@@ -1,0 +1,5 @@
+model,threshold,val_f1,test_precision,test_recall,test_f1,test_pr_auc,test_roc_auc,test_tp,test_fp,test_tn,test_fn
+Random Forest,0.42999999999999994,0.8511,0.9574,0.8824,0.9184,0.9303,0.9747,45,2,1447,6
+LightGBM,0.5499999999999999,0.8261,0.8519,0.902,0.8762,0.9454,0.9909,46,8,1441,5
+Heuristic Baseline,0.05,0.6119,0.4216,0.8431,0.5621,0.3948,0.9024,43,59,1390,8
+Isolation Forest,0.41999999999999993,0.1691,0.08,0.7843,0.1452,0.2535,0.8352,40,460,989,11

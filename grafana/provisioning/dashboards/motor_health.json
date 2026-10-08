@@ -1,0 +1,280 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Current Machine Health Status",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"health\" and r._field == \"status_code\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "NORMAL", "color": "green" }, "1": { "text": "WARNING", "color": "orange" }, "2": { "text": "CRITICAL", "color": "red" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "title": "Live Failure Probability",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"health\" and r._field == \"failure_prob\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "decimals": 4,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.25 },
+              { "color": "red", "value": 0.43 }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "title": "Rotational Speed (RPM)",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"telemetry\" and r._field == \"rpm\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1380 },
+              { "color": "blue", "value": 1750 }
+            ]
+          },
+          "unit": "rotm"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "title": "Tool Wear Load",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"telemetry\" and r._field == \"tool_wear\")\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 150 },
+              { "color": "red", "value": 200 }
+            ]
+          },
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "title": "Real-Time Machine Failure Risk & Threshold",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"health\" and r._field == \"failure_prob\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.25 },
+              { "color": "red", "value": 0.43 }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "title": "Air & Process Temperature Monitoring",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"telemetry\" and (r._field == \"air_temp\" or r._field == \"process_temp\"))\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2 },
+          "unit": "kelvin"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 7,
+      "title": "Torque (Nm) & Rotational Speed (RPM)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"telemetry\" and (r._field == \"torque\" or r._field == \"rpm\"))\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 2 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 8,
+      "title": "Ground Truth Label vs ML Model Prediction",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "InfluxDB_Flux" },
+          "query": "from(bucket: \"machine_data\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => (r._measurement == \"telemetry\" and r._field == \"label\") or (r._measurement == \"health\" and r._field == \"predicted_failure\"))\n  |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "lineWidth": 1 }
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["digital-twin", "machine-health", "ai4i2020"],
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["5s", "10s", "30s"] },
+  "timezone": "browser",
+  "title": "Digital Twin - Industrial Motor Health Dashboard",
+  "uid": "motor_health_dashboard",
+  "version": 1
+}

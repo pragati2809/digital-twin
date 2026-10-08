@@ -1,0 +1,34 @@
+{
+  "best_model_name": "Random Forest",
+  "feature_names": [
+    "air_temp",
+    "process_temp",
+    "rpm",
+    "torque",
+    "tool_wear",
+    "temp_diff",
+    "power_w",
+    "wear_torque",
+    "type_L",
+    "type_M",
+    "type_H"
+  ],
+  "optimal_threshold": 0.42999999999999994,
+  "metrics_test": {
+    "precision": 0.9574,
+    "recall": 0.8824,
+    "f1": 0.9184,
+    "roc_auc": 0.9747,
+    "pr_auc": 0.9303,
+    "tn": 1447,
+    "fp": 2,
+    "fn": 6,
+    "tp": 45,
+    "threshold": 0.43
+  },
+  "status_thresholds": {
+    "normal_max": 0.258,
+    "warning_max": 0.43,
+    "critical_min": 0.43
+  }
+}
