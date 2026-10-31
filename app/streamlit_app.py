@@ -1,5 +1,5 @@
 """
-Digital Twin- Bearing Health Digital Twin (CWRU vibration data)
+Digital Twin - Bearing Health Digital Twin (CWRU vibration data)
 ==============================================================
 Pages:
   1. Live Monitor      - live KPIs, diagnosis and trends (InfluxDB), offline replay fallback
@@ -36,7 +36,7 @@ from src.features import DEFECT_ORDERS, FEATURE_NAMES, TARGET_FS, extract_featur
 from src.replay_publisher import DEMO_SCENARIO, build_payload, load_window_table, window_stream
 
 st.set_page_config(
-    page_title="Digital Twin- Bearing Health Digital Twin",
+    page_title="Digital Twin - Bearing Health Digital Twin",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -51,7 +51,7 @@ st.markdown("""
 
   /* ── App Background ───────────────────────────────────── */
   .stApp { background: #080c14; color: #c9d1e0; }
-     .block-container { padding-top: 4.5rem !important; }
+  .block-container { padding-top: 4.5rem !important; }
 
   /* ── Hide default Streamlit chrome ───────────────────── */
   #MainMenu, footer { visibility: hidden; }
@@ -445,7 +445,7 @@ with st.sidebar:
     elif live_mode:
         st.markdown('<div class="sys-pill pill-ok"><div class="sys-dot dot-ok"></div>Live stream active</div>', unsafe_allow_html=True)
     else:
-        st.markdown('<div class="sys-pill pill-warn"><div class="sys-dot dot-warn"></div>Offline replay mode</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sys-pill pill-ok"><div class="sys-dot dot-ok"></div>Replay stream active</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="nav-lbl">Navigation</div>', unsafe_allow_html=True)
     page = st.radio("nav", ["🖥️  Live Monitor", "📊  Model Analytics", "🔮  Fault Simulator",
@@ -474,8 +474,8 @@ if page.endswith("Live Monitor"):
     if live_mode:
         info("🟢 <b>Live mode</b> - showing data from InfluxDB (MQTT → inference service).")
     else:
-        info("🟡 <b>Offline replay</b> - no live data in InfluxDB. Showing real held-out CWRU test windows scored by the trained "
-             "model, looping through a demo scenario. Start the stack (<code>docker compose up</code>) for the live stream.", "al-warn")
+        info("🟢 <b>Replay stream</b> - real held-out CWRU vibration windows, scored by the trained model and advancing every 2 s. "
+             "The full pipeline (MQTT → InfluxDB → Grafana) runs in the Docker stack, which is not hosted on Streamlit Cloud.", "al-info")
 
     last = live_df.iloc[-1]
     prob = float(last["failure_prob"])
@@ -670,11 +670,17 @@ else:
         ("Trained model artifact", (ROOT / "models" / "best_model.joblib").exists()),
         ("Model metadata", (ROOT / "models" / "metadata.json").exists()),
         (f"CWRU recordings ({n_mat} .mat files)", n_mat >= 4),
-        (f"InfluxDB reachable ({INFLUX_URL})", influx_ok),
-        ("Live telemetry present (last 30 min)", live_mode),
     ]
+    if live_mode:
+        checks += [(f"InfluxDB reachable ({INFLUX_URL})", influx_ok),
+                   ("Live telemetry present (last 30 min)", True)]
+    else:
+        checks += [("Replay stream active - real CWRU windows scored by the trained model (updates every 2 s)", True)]
     for name, ok in checks:
         info(("✅ " if ok else "⚠️ ") + name, "al-ok" if ok else "al-warn")
+    if not live_mode:
+        info("ℹ️ <b>InfluxDB, MQTT and Grafana</b> are part of the Docker stack (<code>docker compose up</code>). "
+             "They are not hosted on Streamlit Cloud, so this deployment runs the replay stream.", "al-info")
 
     st.markdown('<div class="sec-hdr">Alert log (recent windows)</div>', unsafe_allow_html=True)
     log = live_df[live_df["failure_prob"] >= thresholds()[0]].copy()
@@ -685,7 +691,7 @@ else:
     else:
         st.write("No alerts in the current window.")
     if not live_mode:
-        st.caption("Offline replay mode: log shows the demo scenario, not live telemetry.")
+        st.caption("Replay stream: the log shows the demo scenario, not live InfluxDB telemetry.")
 
     st.markdown('<div class="sec-hdr">Downloads</div>', unsafe_allow_html=True)
     d1, d2, d3 = st.columns(3)
