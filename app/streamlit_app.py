@@ -1,5 +1,5 @@
 """
-TwinSight - Bearing Health Digital Twin (CWRU vibration data)
+Digital Twin- Bearing Health Digital Twin (CWRU vibration data)
 ==============================================================
 Pages:
   1. Live Monitor      - live KPIs, diagnosis and trends (InfluxDB), offline replay fallback
@@ -36,7 +36,7 @@ from src.features import DEFECT_ORDERS, FEATURE_NAMES, TARGET_FS, extract_featur
 from src.replay_publisher import DEMO_SCENARIO, build_payload, load_window_table, window_stream
 
 st.set_page_config(
-    page_title="TwinSight - Bearing Health Digital Twin",
+    page_title="Digital Twin- Bearing Health Digital Twin",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -436,7 +436,7 @@ live_df, live_mode = get_live_or_demo() if bundle is not None else (None, False)
 with st.sidebar:
     st.markdown("""
     <div class="brand-wrap"><div class="brand-logo">🏭</div><div>
-      <div class="brand-name">TwinSight</div><div class="brand-tag">Bearing Health Twin</div>
+      <div class="brand-name">Digital Twin</div><div class="brand-tag">Bearing Health Twin</div>
       <div class="brand-ver">v3.0 · CWRU vibration</div></div></div>
     """, unsafe_allow_html=True)
 
@@ -455,7 +455,7 @@ with st.sidebar:
     auto_refresh = st.toggle("Enable auto-refresh", value=os.getenv("AUTO_REFRESH", "1") == "1")
     refresh_secs = st.select_slider("Interval (seconds)", options=[2, 5, 10, 15, 30], value=5, disabled=not auto_refresh)
     st.markdown(f"""
-    <div class="sb-footer"><b>TwinSight Platform</b> v3.0<br>
+    <div class="sb-footer"><b>Digital Twin</b> v3.0<br>
       Model: {meta.get('best_model_name', 'n/a')}<br>
       Data: CWRU bearing, 12 kHz drive-end<br>
       Last refresh: {datetime.now().strftime('%H:%M:%S')}</div>
@@ -697,7 +697,7 @@ else:
             col.download_button(label, p.read_bytes(), p.name)
 
 st.markdown(f"""
-<div class="footer-bar"><b>TwinSight</b> v3.0 &nbsp;·&nbsp; Digital Twin for Bearing Health Monitoring &nbsp;·&nbsp; HCL Project P_222<br>
+<div class="footer-bar"><b>Digital Twin</b> v3.0 &nbsp;·&nbsp; Digital Twin for Bearing Health Monitoring &nbsp;·&nbsp; HCL Project P_222<br>
 Model: {meta.get('best_model_name', 'n/a')} &nbsp;·&nbsp; Data: CWRU Bearing Data Center (drive-end, 12 kHz) &nbsp;·&nbsp; Stack: Streamlit · InfluxDB · MQTT · Docker</div>
 """, unsafe_allow_html=True)
 
