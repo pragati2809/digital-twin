@@ -1,8 +1,12 @@
 """
-Dataset Replay Publisher for Digital Twin system.
+CWRU replay publisher.
 
-Reads rows from the AI4I 2020 dataset CSV and publishes real sensor telemetry
-to the MQTT broker topic 'machine/telemetry' using Paho MQTT v2 API.
+Streams vibration-window features (computed from the real CWRU recordings) to MQTT topic
+'machine/telemetry'. By default it replays only windows from the held-out TEST split, in a
+demo scenario:  normal -> inner race -> normal -> ball -> normal -> outer race -> (repeat)
+
+Each message stands for one 2048-sample window (0.17 s of data); at 1 Hz the replay is
+therefore accelerated ~6x relative to real time.
 """
 
 import argparse
@@ -11,140 +15,137 @@ import logging
 import os
 import sys
 import time
-from typing import Optional
+from typing import Dict, Iterator, List, Optional
 
-# Add project root directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import numpy as np
+import pandas as pd
 import paho.mqtt.client as mqtt
-from src.data import load_dataset, get_standardized_dataframe
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] (ReplayPublisher) %(message)s",
-)
+from src.data import CLASS_NAMES, DEFAULT_DATA_DIR, assign_splits, build_window_table
+from src.features import FEATURE_NAMES
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (ReplayPublisher) %(message)s")
 logger = logging.getLogger(__name__)
 
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+WINDOW_CSV = os.path.join(ROOT, "data", "cwru_windows.csv")
 
-def create_mqtt_client(broker_host: str, broker_port: int) -> mqtt.Client:
-    """
-    Creates and connects an MQTT client using Paho MQTT v2 API.
-    """
+DEMO_SCENARIO = [("normal", 40), ("inner_race", 25), ("normal", 25), ("ball", 25),
+                 ("normal", 25), ("outer_race", 25)]
+
+
+def load_window_table(csv_path: str = WINDOW_CSV) -> pd.DataFrame:
+    """Windows with features + split column (cached CSV written by train.py, else rebuilt)."""
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        if all(c in df.columns for c in FEATURE_NAMES + ["split", "class_id"]):
+            return df
+        logger.warning("Cached window table is outdated; rebuilding from .mat files")
+    return assign_splits(build_window_table(data_dir=DEFAULT_DATA_DIR))
+
+
+def build_payload(row: pd.Series, tick: int) -> Dict:
+    payload = {
+        "t": tick,
+        "source_file": int(row["source_file"]),
+        "win_idx": int(row["win_idx"]),
+        "rpm": float(row["rpm"]),
+        "true_class": int(row["class_id"]),
+        "true_class_name": CLASS_NAMES[int(row["class_id"])],
+        "label": int(row["class_id"] != 0),
+    }
+    payload.update({k: round(float(row[k]), 6) for k in FEATURE_NAMES})
+    return payload
+
+
+def window_stream(df: pd.DataFrame, scenario: str = "demo", split: str = "test",
+                  seed: int = 0, loop: bool = True) -> Iterator[pd.Series]:
+    """Yield rows (windows) according to the chosen scenario."""
+    pool = df if split == "all" else df[df["split"] == split]
+    pool = pool.sort_values(["source_file", "win_idx"]).reset_index(drop=True)
+    if pool.empty:
+        raise ValueError(f"No windows in split '{split}'")
+    by_class = {c: pool[pool["class_id"] == i].reset_index(drop=True) for i, c in enumerate(CLASS_NAMES)}
+    missing = [c for c, d in by_class.items() if d.empty]
+    if missing and scenario == "demo":
+        raise ValueError(f"No windows for classes {missing} in split '{split}'")
+
+    if scenario == "sequential":
+        while True:
+            for _, row in pool.iterrows():
+                yield row
+            if not loop:
+                return
+    elif scenario == "random":
+        rng = np.random.default_rng(seed)
+        while True:
+            yield pool.iloc[int(rng.integers(len(pool)))]
+    else:  # demo
+        pointers = {c: 0 for c in CLASS_NAMES}
+        while True:
+            for cls, n in DEMO_SCENARIO:
+                d = by_class[cls]
+                for _ in range(n):
+                    yield d.iloc[pointers[cls] % len(d)]
+                    pointers[cls] += 1
+            if not loop:
+                return
+
+
+def create_mqtt_client(host: str, port: int, retries: int = 30) -> mqtt.Client:
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-
-    def on_connect(client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            logger.info(f"Connected to MQTT Broker at {broker_host}:{broker_port}")
-        else:
-            logger.error(f"Failed to connect to MQTT Broker, return code: {rc}")
-
-    def on_disconnect(client, userdata, flags, rc, properties=None):
-        logger.warning(f"Disconnected from MQTT Broker (rc={rc}). Reconnecting...")
-
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-
-    client.connect(broker_host, broker_port, keepalive=60)
+    client.on_connect = lambda c, u, f, rc, p=None: logger.info(f"Connected to MQTT {host}:{port} (rc={rc})")
+    client.on_disconnect = lambda c, u, f, rc, p=None: logger.warning(f"Disconnected from MQTT (rc={rc})")
+    for attempt in range(1, retries + 1):
+        try:
+            client.connect(host, port, keepalive=60)
+            break
+        except OSError as e:
+            logger.warning(f"MQTT broker not reachable ({e}); retry {attempt}/{retries} in 3 s")
+            time.sleep(3)
+    else:
+        raise ConnectionError(f"Could not connect to MQTT broker at {host}:{port}")
     client.loop_start()
     return client
 
 
-def run_replay(
-    csv_path: str = "data/ai4i2020.csv",
-    broker_host: str = "localhost",
-    broker_port: int = 1883,
-    rate_hz: float = 1.0,
-    loop: bool = True,
-    start_row: int = 0,
-    shuffle_seed: Optional[int] = None,
-    max_rows: Optional[int] = None,
-):
-    df_raw = load_dataset(csv_path)
-    df_std = get_standardized_dataframe(df_raw)
-
-    if start_row > 0:
-        df_std = df_std.iloc[start_row:].reset_index(drop=True)
-
-    if shuffle_seed is not None:
-        df_std = df_std.sample(frac=1.0, random_state=shuffle_seed).reset_index(drop=True)
-
-    if max_rows is not None:
-        df_std = df_std.head(max_rows)
-
-    client = create_mqtt_client(broker_host, broker_port)
-    delay_sec = 1.0 / max(0.1, rate_hz)
-
-    row_index = 0
-    t_tick = 0
-    total_rows = len(df_std)
-
-    logger.info(f"Starting replay stream of {total_rows} rows at {rate_hz} Hz (delay={delay_sec:.2f}s per tick)...")
-
+def run_replay(host: str, port: int, rate_hz: float, scenario: str, split: str,
+               loop: bool, max_ticks: Optional[int], seed: int):
+    df = load_window_table()
+    client = create_mqtt_client(host, port)
+    delay = 1.0 / max(0.1, rate_hz)
+    logger.info(f"Replaying CWRU windows (scenario={scenario}, split={split}) at {rate_hz} Hz")
+    tick = 0
     try:
-        while True:
-            row = df_std.iloc[row_index]
-            t_tick += 1
-
-            payload = {
-                "t": t_tick,
-                "udi": int(row["udi"]),
-                "product_id": str(row["product_id"]),
-                "type": str(row["type"]),
-                "air_temp": float(row["air_temp"]),
-                "process_temp": float(row["process_temp"]),
-                "rpm": float(row["rpm"]),
-                "torque": float(row["torque"]),
-                "tool_wear": float(row["tool_wear"]),
-                "label": int(row["machine_failure"]),  # Ground truth label for evaluation
-            }
-
-            json_payload = json.dumps(payload)
-            client.publish("machine/telemetry", json_payload, qos=0)
-
-            if t_tick % 10 == 0 or row["machine_failure"] == 1:
-                fail_flag = " [FAILURE ROW]" if row["machine_failure"] == 1 else ""
-                logger.info(f"Tick {t_tick} (Row {row_index+1}/{total_rows}): Type={payload['type']} Temp={payload['process_temp']}K RPM={payload['rpm']} Torque={payload['torque']}Nm Wear={payload['tool_wear']}min{fail_flag}")
-
-            row_index += 1
-            if row_index >= total_rows:
-                if loop:
-                    logger.info("Reached end of dataset; looping back to row 0.")
-                    row_index = 0
-                else:
-                    logger.info("Reached end of dataset; replay finished.")
-                    break
-
-            time.sleep(delay_sec)
-
+        for row in window_stream(df, scenario, split, seed, loop):
+            tick += 1
+            payload = build_payload(row, tick)
+            client.publish("machine/telemetry", json.dumps(payload), qos=0)
+            if tick % 10 == 0 or payload["label"]:
+                logger.info(f"t={tick} file={payload['source_file']} state={payload['true_class_name']:<10} "
+                            f"rms={payload['rms']:.3f} kurt={payload['kurtosis']:.2f}")
+            if max_ticks and tick >= max_ticks:
+                break
+            time.sleep(delay)
     except KeyboardInterrupt:
-        logger.info("Replay publisher stopped by user.")
+        logger.info("Replay stopped by user.")
     finally:
         client.loop_stop()
         client.disconnect()
-        logger.info("MQTT client disconnected.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AI4I 2020 Telemetry Replay Publisher")
-    parser.add_argument("--csv", type=str, default="data/ai4i2020.csv", help="Path to CSV file")
-    parser.add_argument("--host", type=str, default=os.getenv("MQTT_HOST", "localhost"), help="MQTT broker host")
-    parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", 1883)), help="MQTT broker port")
-    parser.add_argument("--rate", type=float, default=1.0, help="Publish rate in Hz")
-    parser.add_argument("--no-loop", action="store_true", help="Disable looping when reaching end of dataset")
-    parser.add_argument("--start-row", type=int, default=0, help="Starting row index")
-    parser.add_argument("--seed", type=int, default=None, help="Shuffle random seed")
-    parser.add_argument("--max-rows", type=int, default=None, help="Maximum number of rows to replay")
-
-    args = parser.parse_args()
-
-    run_replay(
-        csv_path=args.csv,
-        broker_host=args.host,
-        broker_port=args.port,
-        rate_hz=args.rate,
-        loop=not args.no_loop,
-        start_row=args.start_row,
-        shuffle_seed=args.seed,
-        max_rows=args.max_rows,
-    )
+    p = argparse.ArgumentParser(description="CWRU vibration replay publisher")
+    p.add_argument("--host", default=os.getenv("MQTT_HOST", "localhost"))
+    p.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", 1883)))
+    p.add_argument("--rate", type=float, default=1.0, help="windows per second")
+    p.add_argument("--scenario", choices=["demo", "sequential", "random"], default="demo")
+    p.add_argument("--split", choices=["test", "val", "train", "all"], default="test")
+    p.add_argument("--no-loop", action="store_true")
+    p.add_argument("--loop", action="store_true", help="(default) loop forever; kept for compatibility")
+    p.add_argument("--max-ticks", type=int, default=None)
+    p.add_argument("--seed", type=int, default=0)
+    a = p.parse_args()
+    run_replay(a.host, a.port, a.rate, a.scenario, a.split, not a.no_loop, a.max_ticks, a.seed)

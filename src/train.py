@@ -1,23 +1,34 @@
 """
-Model training, evaluation, threshold tuning, and artifact serialization module.
+Train and evaluate bearing-fault models on CWRU vibration features.
 
-Implements stratified Train/Validation/Test splitting, model comparison
-(Heuristic Baseline, Isolation Forest, Random Forest, LightGBM/XGBoost),
-decision threshold optimization for imbalanced failure detection, and saves
-best model pipeline and evaluation metrics.
+Pipeline: load .mat -> 12 kHz windows -> vibration features -> leak-aware split ->
+compare candidates -> pick the best DEPLOYABLE model on the VALIDATION set ->
+tune the alarm threshold on validation -> report once on the untouched TEST set.
+
+Deployable models are 4-class sklearn pipelines (Normal / Inner Race / Ball / Outer Race).
+The failure probability served to the twin is  1 - P(Normal).
+Isolation Forest (trained on normal data only) and a rule baseline are compared for context.
 """
 
 import json
 import os
 import sys
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple
 
-# Add project root directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import joblib
 import numpy as np
 import pandas as pd
+import sklearn
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score, average_precision_score, confusion_matrix, f1_score, log_loss,
+    precision_recall_curve, precision_score, recall_score, roc_auc_score, roc_curve,
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 try:
     import matplotlib
@@ -25,24 +36,8 @@ try:
     import matplotlib.pyplot as plt
     import seaborn as sns
     HAS_PLOTTING = True
-except ImportError:
+except ImportError:  # plots are optional
     HAS_PLOTTING = False
-
-from sklearn.ensemble import IsolationForest, RandomForestClassifier
-from sklearn.inspection import permutation_importance
-from sklearn.metrics import (
-    average_precision_score,
-    confusion_matrix,
-    f1_score,
-    precision_recall_curve,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-    roc_curve,
-)
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 try:
     import lightgbm as lgb
@@ -50,342 +45,279 @@ try:
 except ImportError:
     HAS_LIGHTGBM = False
 
-try:
-    import xgboost as xgb
-    HAS_XGBOOST = True
-except ImportError:
-    HAS_XGBOOST = False
-
-from src.data import load_dataset, get_standardized_dataframe
-from src.features import create_features_df, ENGINEERED_FEATURE_NAMES
+from src.data import (
+    CLASS_LABELS, CLASS_NAMES, assign_splits, build_window_table, describe_split_protocol,
+    load_all_recordings, recording_summary,
+)
+from src.features import FEATURE_NAMES
 
 MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
 REPORTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "reports"))
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
+SEED = 42
 
 
-class HeuristicThresholdModel:
-    """
-    Domain rule-based baseline model for industrial failure detection.
-    Failure rules:
-    1. Tool Wear > 200 min AND Torque > 40 Nm
-    2. Heat Dissipation failure: Temp Diff < 8.6 K AND RPM < 1380
-    3. Power Failure: Mechanical Power < 3500 W OR Mechanical Power > 9000 W
-    """
-    def fit(self, X, y=None):
+# ──────────────────────────── comparison-only models ────────────────────────────
+class ThresholdBaseline:
+    """Rule baseline: share of {rms, kurtosis, crest, impulse} above the normal 99th percentile."""
+
+    cols = ["rms", "kurtosis", "crest_factor", "impulse_factor"]
+
+    def fit(self, X: pd.DataFrame, y_binary):
+        normal = X[np.asarray(y_binary) == 0]
+        self.limits_ = normal[self.cols].quantile(0.99)
         return self
 
-    def predict_proba(self, X):
-        if isinstance(X, pd.DataFrame):
-            df = X
-        else:
-            df = pd.DataFrame(X, columns=ENGINEERED_FEATURE_NAMES)
-
-        # Rule scores
-        score = np.zeros(len(df))
-        rule1 = (df["tool_wear"] > 200) & (df["torque"] > 40)
-        rule2 = (df["temp_diff"] < 8.6) & (df["rpm"] < 1380)
-        rule3 = (df["power_w"] < 3500) | (df["power_w"] > 9000)
-
-        score[rule1] += 0.4
-        score[rule2] += 0.4
-        score[rule3] += 0.4
-
-        proba_1 = np.clip(score, 0.0, 1.0)
-        proba_0 = 1.0 - proba_1
-        return np.column_stack([proba_0, proba_1])
-
-    def predict(self, X, threshold=0.5):
-        proba = self.predict_proba(X)[:, 1]
-        return (proba >= threshold).astype(int)
+    def fault_proba(self, X: pd.DataFrame) -> np.ndarray:
+        hits = np.column_stack([(X[c] > self.limits_[c]).to_numpy() for c in self.cols])
+        return hits.mean(axis=1)
 
 
-class IsolationForestWrapper:
-    """
-    Unsupervised Anomaly Detection wrapper around IsolationForest.
-    Maps anomaly scores [-1, 1] to pseudo-probabilities [0, 1].
-    """
-    def __init__(self, contamination=0.035, random_state=42):
-        self.contamination = contamination
-        self.random_state = random_state
-        self.model = IsolationForest(
-            contamination=self.contamination, random_state=self.random_state
-        )
+class IsolationForestDetector:
+    """Unsupervised: fitted on NORMAL training windows only; score scaled with train stats."""
 
-    def fit(self, X, y=None):
-        self.model.fit(X)
+    def fit(self, X: pd.DataFrame, y_binary):
+        normal = X[np.asarray(y_binary) == 0]
+        self.scaler_ = StandardScaler().fit(normal)
+        self.model_ = IsolationForest(n_estimators=200, random_state=SEED).fit(self.scaler_.transform(normal))
+        s = -self.model_.score_samples(self.scaler_.transform(normal))
+        self.lo_, self.hi_ = float(np.percentile(s, 50)), float(np.percentile(s, 99.9))
         return self
 
-    def predict_proba(self, X):
-        # decision_function returns negative values for anomalies
-        scores = self.model.decision_function(X)
-        # Normalize score into range [0, 1] where 1 is anomalous
-        # Higher score = more anomalous = higher failure prob
-        scaled_scores = (scores.max() - scores) / (scores.max() - scores.min() + 1e-8)
-        return np.column_stack([1.0 - scaled_scores, scaled_scores])
-
-    def predict(self, X, threshold=0.5):
-        proba = self.predict_proba(X)[:, 1]
-        return (proba >= threshold).astype(int)
+    def fault_proba(self, X: pd.DataFrame) -> np.ndarray:
+        s = -self.model_.score_samples(self.scaler_.transform(X))
+        return np.clip((s - self.lo_) / (self.hi_ - self.lo_ + 1e-9), 0.0, 1.0)
 
 
-def evaluate_predictions(
-    y_true: np.ndarray, y_proba: np.ndarray, threshold: float
-) -> Dict[str, float]:
-    y_pred = (y_proba >= threshold).astype(int)
-    cm = confusion_matrix(y_true, y_pred)
-    tn, fp, fn, tp = cm.ravel()
-
-    precision = float(precision_score(y_true, y_pred, zero_division=0))
-    recall = float(recall_score(y_true, y_pred, zero_division=0))
-    f1 = float(f1_score(y_true, y_pred, zero_division=0))
-    roc_auc = float(roc_auc_score(y_true, y_proba)) if len(np.unique(y_true)) > 1 else 0.0
-    pr_auc = float(average_precision_score(y_true, y_proba)) if len(np.unique(y_true)) > 1 else 0.0
-
+# ──────────────────────────── metrics helpers ────────────────────────────
+def binary_metrics(y_true, p_fault, threshold: float) -> Dict[str, float]:
+    y_pred = (p_fault >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    two = len(np.unique(y_true)) > 1
     return {
-        "precision": round(precision, 4),
-        "recall": round(recall, 4),
-        "f1": round(f1, 4),
-        "roc_auc": round(roc_auc, 4),
-        "pr_auc": round(pr_auc, 4),
-        "tn": int(tn),
-        "fp": int(fp),
-        "fn": int(fn),
-        "tp": int(tp),
-        "threshold": round(threshold, 4),
+        "precision": round(float(precision_score(y_true, y_pred, zero_division=0)), 4),
+        "recall": round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
+        "f1": round(float(f1_score(y_true, y_pred, zero_division=0)), 4),
+        "roc_auc": round(float(roc_auc_score(y_true, p_fault)), 4) if two else 0.0,
+        "pr_auc": round(float(average_precision_score(y_true, p_fault)), 4) if two else 0.0,
+        "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+        "threshold": round(float(threshold), 4),
     }
 
 
-def find_optimal_threshold(
-    y_val: np.ndarray, y_proba_val: np.ndarray, target_recall: float = 0.80
-) -> Tuple[float, float]:
-    """
-    Sweeps thresholds on validation set to maximize F1 score while maintaining target recall.
-    """
-    best_thresh = 0.5
-    best_f1 = -1.0
-    thresholds = np.linspace(0.05, 0.95, 91)
-
-    for th in thresholds:
-        y_pred = (y_proba_val >= th).astype(int)
-        rec = recall_score(y_val, y_pred, zero_division=0)
-        prec = precision_score(y_val, y_pred, zero_division=0)
-        f1 = f1_score(y_val, y_pred, zero_division=0)
-
-        # Prioritize F1 subject to reasonable recall (> target_recall * 0.9)
-        if rec >= (target_recall * 0.85) and f1 > best_f1:
-            best_f1 = f1
-            best_thresh = th
-
-    # Fallback if no threshold met target recall condition
-    if best_f1 < 0:
-        for th in thresholds:
-            y_pred = (y_proba_val >= th).astype(int)
-            f1 = f1_score(y_val, y_pred, zero_division=0)
-            if f1 > best_f1:
-                best_f1 = f1
-                best_thresh = th
-
-    return float(best_thresh), float(best_f1)
+def find_optimal_threshold(y_val, p_val) -> Tuple[float, float]:
+    """Centre of the plateau of thresholds that reach the best validation F1 (robust when
+    classes separate perfectly, where 'first best' would pick an extreme threshold)."""
+    grid = np.round(np.linspace(0.05, 0.95, 91), 4)
+    f1s = np.array([f1_score(y_val, (p_val >= t).astype(int), zero_division=0) for t in grid])
+    best = f1s.max()
+    plateau = grid[f1s >= best - 1e-9]
+    return float(np.median(plateau)), float(best)
 
 
-def train_and_evaluate(data_path: str = "data/ai4i2020.csv") -> Dict[str, Any]:
-    os.makedirs(MODELS_DIR, exist_ok=True)
-    os.makedirs(REPORTS_DIR, exist_ok=True)
+def multiclass_metrics(y_true, y_pred) -> Dict[str, float]:
+    return {
+        "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
+        "macro_f1": round(float(f1_score(y_true, y_pred, average="macro", zero_division=0)), 4),
+    }
 
-    df_raw = load_dataset(data_path)
-    df_std = get_standardized_dataframe(df_raw)
 
-    X = create_features_df(df_raw)
-    y = df_std["machine_failure"].values
-
-    # Stratified Split: 70% Train, 15% Validation, 15% Test
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.15, random_state=42, stratify=y
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_val, y_train_val, test_size=0.17647, random_state=42, stratify=y_train_val
-    )  # 0.17647 * 0.85 = 0.15
-
-    print(f"Data Split Sizes: Train={len(X_train)} (Failures={y_train.sum()}), Val={len(X_val)} (Failures={y_val.sum()}), Test={len(X_test)} (Failures={y_test.sum()})")
-
-    # Define candidate models
-    pos_weight = (len(y_train) - y_train.sum()) / max(1, y_train.sum())
-
-    candidates = {
-        "Heuristic Baseline": HeuristicThresholdModel(),
-        "Isolation Forest": Pipeline([
+def candidate_models() -> Dict[str, Pipeline]:
+    models = {
+        "Logistic Regression": Pipeline([
             ("scaler", StandardScaler()),
-            ("model", IsolationForestWrapper(contamination=0.035, random_state=42)),
+            ("model", LogisticRegression(max_iter=2000, class_weight="balanced", C=1.0)),
         ]),
         "Random Forest": Pipeline([
             ("scaler", StandardScaler()),
-            ("model", RandomForestClassifier(
-                n_estimators=100, class_weight="balanced", random_state=42, n_jobs=-1
-            )),
+            ("model", RandomForestClassifier(n_estimators=300, class_weight="balanced",
+                                             min_samples_leaf=2, random_state=SEED, n_jobs=-1)),
         ]),
     }
-
     if HAS_LIGHTGBM:
-        candidates["LightGBM"] = Pipeline([
+        models["LightGBM"] = Pipeline([
             ("scaler", StandardScaler()),
-            ("model", lgb.LGBMClassifier(
-                n_estimators=100, scale_pos_weight=pos_weight, random_state=42, verbosity=-1
-            )),
+            ("model", lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05, num_leaves=15,
+                                         class_weight="balanced", random_state=SEED, verbosity=-1)),
         ])
-    elif HAS_XGBOOST:
-        candidates["XGBoost"] = Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", xgb.XGBClassifier(
-                n_estimators=100, scale_pos_weight=pos_weight, random_state=42, eval_metric="logloss"
-            )),
-        ])
+    return models
 
-    results = []
-    trained_pipelines = {}
-    optimal_thresholds = {}
 
-    for name, pipeline in candidates.items():
-        print(f"\n--- Training {name} ---")
-        if name == "Heuristic Baseline":
-            pipeline.fit(X_train, y_train)
-        else:
-            pipeline.fit(X_train, y_train)
+def train_and_evaluate(data_dir: str = os.path.join(DATA_DIR, "cwru")) -> Dict:
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
 
-        # Validation prediction & threshold tuning
-        if hasattr(pipeline, "predict_proba"):
-            val_proba = pipeline.predict_proba(X_val)[:, 1]
-            test_proba = pipeline.predict_proba(X_test)[:, 1]
-        else:
-            val_proba = pipeline.predict(X_val)
-            test_proba = pipeline.predict(X_test)
+    recs = load_all_recordings(data_dir)
+    rec_table = recording_summary(recs)
+    print(rec_table.to_string(index=False))
 
-        opt_th, val_f1 = find_optimal_threshold(y_val, val_proba, target_recall=0.80)
-        optimal_thresholds[name] = opt_th
+    table = assign_splits(build_window_table(recs))
+    protocol = describe_split_protocol(table)
+    table.to_csv(os.path.join(DATA_DIR, "cwru_windows.csv"), index=False)
 
-        val_metrics = evaluate_predictions(y_val, val_proba, opt_th)
-        test_metrics = evaluate_predictions(y_test, test_proba, opt_th)
+    split = {s: table[table["split"] == s].reset_index(drop=True) for s in ("train", "val", "test")}
+    for s, d in split.items():
+        print(f"{s:5s}: {len(d):4d} windows  {d['class_name'].value_counts().to_dict()}")
+    for s in ("train", "val", "test"):
+        if split[s]["class_id"].nunique() < 4:
+            raise RuntimeError(f"'{s}' split is missing a class; check the CWRU files in {data_dir}")
 
-        print(f"[{name}] Optimal Threshold = {opt_th:.4f}")
-        print(f"[{name}] Test Metrics: Precision={test_metrics['precision']:.4f}, Recall={test_metrics['recall']:.4f}, F1={test_metrics['f1']:.4f}, PR-AUC={test_metrics['pr_auc']:.4f}, ROC-AUC={test_metrics['roc_auc']:.4f}")
+    X = {s: d[FEATURE_NAMES] for s, d in split.items()}
+    y = {s: d["class_id"].to_numpy() for s, d in split.items()}
+    yb = {s: (y[s] != 0).astype(int) for s in y}
+    normal_idx = CLASS_NAMES.index("normal")
 
-        trained_pipelines[name] = pipeline
+    rows, fitted, thresholds = [], {}, {}
 
-        record = {
-            "model": name,
-            "threshold": opt_th,
-            "val_f1": val_metrics["f1"],
-            "test_precision": test_metrics["precision"],
-            "test_recall": test_metrics["recall"],
-            "test_f1": test_metrics["f1"],
-            "test_pr_auc": test_metrics["pr_auc"],
-            "test_roc_auc": test_metrics["roc_auc"],
-            "test_tp": test_metrics["tp"],
-            "test_fp": test_metrics["fp"],
-            "test_tn": test_metrics["tn"],
-            "test_fn": test_metrics["fn"],
-        }
-        results.append(record)
+    def record(name, p_val, p_test, deployable, mc_val=None, mc_test=None, ll=np.nan):
+        th, val_f1 = find_optimal_threshold(yb["val"], p_val)
+        thresholds[name] = th
+        tm = binary_metrics(yb["test"], p_test, th)
+        rows.append({
+            "model": name, "deployable": deployable, "threshold": th,
+            "val_f1": round(val_f1, 4),
+            "val_macro_f1": mc_val["macro_f1"] if mc_val else np.nan,
+            "val_logloss": round(ll, 5) if ll == ll else np.nan,
+            "test_precision": tm["precision"], "test_recall": tm["recall"], "test_f1": tm["f1"],
+            "test_pr_auc": tm["pr_auc"], "test_roc_auc": tm["roc_auc"],
+            "test_accuracy_4class": mc_test["accuracy"] if mc_test else np.nan,
+            "test_macro_f1_4class": mc_test["macro_f1"] if mc_test else np.nan,
+            "test_tp": tm["tp"], "test_fp": tm["fp"], "test_tn": tm["tn"], "test_fn": tm["fn"],
+        })
+        print(f"[{name:20s}] thr={th:.2f}  test P={tm['precision']:.3f} R={tm['recall']:.3f} "
+              f"F1={tm['f1']:.3f}  ROC-AUC={tm['roc_auc']:.3f}")
 
-    results_df = pd.DataFrame(results).sort_values(by="test_f1", ascending=False)
-    results_df.to_csv(os.path.join(REPORTS_DIR, "model_comparison.csv"), index=False)
+    # comparison-only models
+    for name, det in (("Rule Baseline", ThresholdBaseline()), ("Isolation Forest", IsolationForestDetector())):
+        det.fit(X["train"], yb["train"])
+        record(name, det.fault_proba(X["val"]), det.fault_proba(X["test"]), deployable=False)
 
-    best_model_name = results_df.iloc[0]["model"]
-    best_pipeline = trained_pipelines[best_model_name]
-    best_threshold = optimal_thresholds[best_model_name]
+    # deployable 4-class models
+    for name, pipe in candidate_models().items():
+        pipe.fit(X["train"], y["train"])
+        pv, pt = pipe.predict_proba(X["val"]), pipe.predict_proba(X["test"])
+        record(
+            name, 1 - pv[:, normal_idx], 1 - pt[:, normal_idx], deployable=True,
+            mc_val=multiclass_metrics(y["val"], pv.argmax(1)),
+            mc_test=multiclass_metrics(y["test"], pt.argmax(1)),
+            ll=float(log_loss(y["val"], pv, labels=list(range(4)))),
+        )
+        fitted[name] = pipe
 
-    print(f"\n==========================================")
-    print(f" BEST MODEL: {best_model_name} (F1: {results_df.iloc[0]['test_f1']:.4f})")
-    print(f"==========================================")
+    results = pd.DataFrame(rows)
+    deploy = results[results["deployable"]].sort_values(["val_macro_f1", "val_logloss"], ascending=[False, True])
+    best_name = deploy.iloc[0]["model"]  # chosen on VALIDATION, never on test
+    results = results.sort_values(["deployable", "test_f1"], ascending=[False, False])
+    results.to_csv(os.path.join(REPORTS_DIR, "model_comparison.csv"), index=False)
 
-    # Save best model pipeline
-    best_model_path = os.path.join(MODELS_DIR, "best_model.joblib")
-    joblib.dump(best_pipeline, best_model_path)
-    print(f"Saved best model pipeline to {best_model_path}")
+    best = fitted[best_name]
+    thr = thresholds[best_name]
+    p_test = best.predict_proba(X["test"])
+    p_fault = 1 - p_test[:, normal_idx]
+    pred_cls = p_test.argmax(1)
+    final_bin = binary_metrics(yb["test"], p_fault, thr)
+    final_mc = multiclass_metrics(y["test"], pred_cls)
+    cm = confusion_matrix(y["test"], pred_cls, labels=list(range(4)))
+    print(f"\nBEST (by validation): {best_name}  | test 4-class acc={final_mc['accuracy']}  "
+          f"macro-F1={final_mc['macro_f1']}  | fault detection F1={final_bin['f1']}")
 
-    # Best model predictions on test set
-    best_test_proba = best_pipeline.predict_proba(X_test)[:, 1]
-    final_test_metrics = evaluate_predictions(y_test, best_test_proba, best_threshold)
+    # final deployable model: refit on train+val (hyper-parameters / threshold already fixed)
+    final_pipe = candidate_models()[best_name]
+    final_pipe.fit(pd.concat([X["train"], X["val"]]), np.concatenate([y["train"], y["val"]]))
+    bundle = {
+        "pipeline": final_pipe,
+        "feature_names": FEATURE_NAMES,
+        "class_names": CLASS_NAMES,
+        "model_name": best_name,
+    }
+    joblib.dump(bundle, os.path.join(MODELS_DIR, "best_model.joblib"))
 
-    # Save metadata
+    # sanity: refit model must still do well on the held-out test split
+    p_ref = final_pipe.predict_proba(X["test"])
+    refit_bin = binary_metrics(yb["test"], 1 - p_ref[:, normal_idx], thr)
+
     metadata = {
-        "best_model_name": best_model_name,
-        "feature_names": ENGINEERED_FEATURE_NAMES,
-        "optimal_threshold": best_threshold,
-        "metrics_test": final_test_metrics,
+        "best_model_name": best_name,
+        "dataset": "CWRU Bearing Data Center, drive-end accelerometer, resampled to 12 kHz",
+        "feature_names": FEATURE_NAMES,
+        "class_names": CLASS_NAMES,
+        "class_labels": CLASS_LABELS,
+        "window_size": 2048,
+        "window_stride": 512,
+        "sample_rate_hz": 12000,
+        "optimal_threshold": thr,
+        "metrics_test": final_bin,
+        "metrics_test_refit_all_train_val": refit_bin,
+        "metrics_test_4class": final_mc,
+        "confusion_matrix_4class": cm.tolist(),
         "status_thresholds": {
-            "normal_max": round(best_threshold * 0.6, 4),
-            "warning_max": round(best_threshold, 4),
-            "critical_min": round(best_threshold, 4),
+            "normal_max": round(thr * 0.6, 4),
+            "warning_max": round(thr, 4),
+            "critical_min": round(thr, 4),
         },
+        "split_protocol": protocol,
+        "split_sizes": {s: {CLASS_NAMES[k]: int(v) for k, v in d["class_id"].value_counts().items()}
+                        for s, d in split.items()},
+        "recordings": rec_table.to_dict(orient="records"),
+        "caveat": ("Only one recording per fault class (0.007in, 0 HP). Fault test windows come from "
+                   "later time blocks of the SAME recordings (purged gap, no shared samples); the normal "
+                   "class is tested on an entire unseen recording/load. Add more CWRU fault files "
+                   "(other loads / sizes) and re-run training for a recording-level fault evaluation."),
+        "library_versions": {"scikit-learn": sklearn.__version__, "numpy": np.__version__,
+                             "pandas": pd.__version__},
     }
     with open(os.path.join(MODELS_DIR, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
-
     with open(os.path.join(REPORTS_DIR, "metrics.json"), "w") as f:
-        json.dump({"best_model": best_model_name, "metrics": final_test_metrics, "comparison": results}, f, indent=2)
+        json.dump({"best_model": best_name, "binary": final_bin, "four_class": final_mc,
+                   "comparison": results.to_dict(orient="records")}, f, indent=2, default=float)
 
-    if not HAS_PLOTTING:
-        print("Matplotlib/Seaborn not installed yet; skipping PNG plots.")
-        return metadata
-
-    # Feature Importance Plot
-    fig, ax = plt.subplots(figsize=(8, 6))
-    if hasattr(best_pipeline, "named_steps") and hasattr(best_pipeline.named_steps.get("model"), "feature_importances_"):
-        importances = best_pipeline.named_steps["model"].feature_importances_
-        sorted_idx = np.argsort(importances)
-        ax.barh(np.array(ENGINEERED_FEATURE_NAMES)[sorted_idx], importances[sorted_idx], color="#3498db")
-        ax.set_title(f"Feature Importances ({best_model_name})", fontsize=12, fontweight="bold")
-        ax.set_xlabel("Gini / Gain Importance")
-    else:
-        # Fallback to Permutation Importance
-        perm_imp = permutation_importance(best_pipeline, X_test, y_test, n_repeats=10, random_state=42)
-        sorted_idx = np.argsort(perm_imp.importances_mean)
-        ax.barh(np.array(ENGINEERED_FEATURE_NAMES)[sorted_idx], perm_imp.importances_mean[sorted_idx], color="#3498db")
-        ax.set_title(f"Permutation Feature Importance ({best_model_name})", fontsize=12, fontweight="bold")
-        ax.set_xlabel("Mean Accuracy/F1 Decrease")
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(REPORTS_DIR, "feature_importance.png"), dpi=300)
-    plt.close()
-
-    # ROC and PR Curves Plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # ROC Curve
-    fpr, tpr, _ = roc_curve(y_test, best_test_proba)
-    ax1.plot(fpr, tpr, color="#2980b9", lw=2, label=f"ROC (AUC = {final_test_metrics['roc_auc']:.3f})")
-    ax1.plot([0, 1], [0, 1], color="gray", linestyle="--")
-    ax1.set_title("Receiver Operating Characteristic (ROC)", fontsize=12, fontweight="bold")
-    ax1.set_xlabel("False Positive Rate")
-    ax1.set_ylabel("True Positive Rate")
-    ax1.legend(loc="lower right")
-
-    # PR Curve
-    prec_arr, rec_arr, _ = precision_recall_curve(y_test, best_test_proba)
-    ax2.plot(rec_arr, prec_arr, color="#e74c3c", lw=2, label=f"PR (AUC = {final_test_metrics['pr_auc']:.3f})")
-    ax2.axvline(final_test_metrics["recall"], color="black", linestyle=":", label=f"Optimal Rec = {final_test_metrics['recall']:.2f}")
-    ax2.set_title("Precision-Recall Curve (PR)", fontsize=12, fontweight="bold")
-    ax2.set_xlabel("Recall")
-    ax2.set_ylabel("Precision")
-    ax2.legend(loc="lower left")
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(REPORTS_DIR, "roc_pr_curves.png"), dpi=300)
-    plt.close()
-
-    # Confusion Matrix Plot
-    fig, ax = plt.subplots(figsize=(6, 5))
-    cm = confusion_matrix(y_test, (best_test_proba >= best_threshold).astype(int))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax, cbar=False,
-                xticklabels=["Predicted Normal", "Predicted Failure"],
-                yticklabels=["Actual Normal", "Actual Failure"])
-    ax.set_title(f"Test Confusion Matrix ({best_model_name})", fontsize=12, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(os.path.join(REPORTS_DIR, "confusion_matrix.png"), dpi=300)
-    plt.close()
-
-    print("Successfully completed model training, evaluation, and plot generation.")
+    if HAS_PLOTTING:
+        make_plots(best, best_name, X["test"], y["test"], yb["test"], p_fault, pred_cls, cm, final_bin, table)
+    print("Training complete. Artifacts written to models/ and reports/.")
     return metadata
+
+
+def make_plots(best, best_name, X_test, y_test, yb_test, p_fault, pred_cls, cm, final_bin, table):
+    # confusion matrix
+    labels = [CLASS_LABELS[c].replace(" Fault", "") for c in CLASS_NAMES]
+    fig, ax = plt.subplots(figsize=(6.5, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, ax=ax,
+                xticklabels=labels, yticklabels=labels)
+    ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
+    ax.set_title(f"Test confusion matrix ({best_name})", fontweight="bold")
+    plt.tight_layout(); plt.savefig(os.path.join(REPORTS_DIR, "confusion_matrix.png"), dpi=150); plt.close()
+
+    # ROC / PR
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.8))
+    fpr, tpr, _ = roc_curve(yb_test, p_fault)
+    a1.plot(fpr, tpr, lw=2, label=f"AUC = {final_bin['roc_auc']:.3f}"); a1.plot([0, 1], [0, 1], "--", c="gray")
+    a1.set(title="ROC - fault detection", xlabel="False positive rate", ylabel="True positive rate"); a1.legend()
+    pr, rc, _ = precision_recall_curve(yb_test, p_fault)
+    a2.plot(rc, pr, lw=2, c="#e74c3c", label=f"PR-AUC = {final_bin['pr_auc']:.3f}")
+    a2.set(title="Precision-Recall - fault detection", xlabel="Recall", ylabel="Precision"); a2.legend()
+    plt.tight_layout(); plt.savefig(os.path.join(REPORTS_DIR, "roc_pr_curves.png"), dpi=150); plt.close()
+
+    # feature importance (model-native, else permutation)
+    model = best.named_steps["model"]
+    if hasattr(model, "feature_importances_"):
+        imp = np.asarray(model.feature_importances_, dtype=float)
+        title = f"Feature importance ({best_name})"
+    else:
+        from sklearn.inspection import permutation_importance
+        imp = permutation_importance(best, X_test, y_test, n_repeats=10, random_state=SEED).importances_mean
+        title = f"Permutation importance ({best_name})"
+    order = np.argsort(imp)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.barh(np.array(FEATURE_NAMES)[order], imp[order], color="#3498db"); ax.set_title(title, fontweight="bold")
+    plt.tight_layout(); plt.savefig(os.path.join(REPORTS_DIR, "feature_importance.png"), dpi=150); plt.close()
+
+    # class balance per split
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ct = table[table["split"] != "drop"].groupby(["split", "class_name"]).size().unstack(fill_value=0)
+    ct.loc[["train", "val", "test"]].plot(kind="bar", ax=ax, rot=0); ax.set_ylabel("windows")
+    ax.set_title("Windows per class and split", fontweight="bold")
+    plt.tight_layout(); plt.savefig(os.path.join(REPORTS_DIR, "class_balance.png"), dpi=150); plt.close()
 
 
 if __name__ == "__main__":

@@ -1,155 +1,121 @@
 """
-Feature engineering module for AI4I 2020 Predictive Maintenance Dataset.
+Vibration feature extraction for bearing condition monitoring (CWRU drive-end sensor).
 
-Transforms raw sensor fields into engineered features while strictly excluding
-target-leakage columns (UDI, Product ID, TWF, HDF, PWF, OSF, RNF).
+A *window* of raw acceleration (2048 samples @ 12 kHz) is turned into 18 features:
+
+  time domain   rms, peak_to_peak, crest_factor, kurtosis, skewness, shape_factor,
+                impulse_factor, zero_cross_rate
+  frequency     spectral_centroid and the share of spectral energy in six bands
+  envelope      amplitude of the Hilbert-envelope spectrum at the bearing defect
+                frequencies (BPFO / BPFI / ball-defect) relative to the noise floor
+
+Nothing here uses labels, file names or recording IDs, so there is no target leakage.
+`rpm` is only used to locate the defect frequencies and is NOT a model input.
 """
 
-import math
-from typing import Dict, Any, List, Union
+from __future__ import annotations
+
+from typing import Dict, Mapping
+
 import numpy as np
 import pandas as pd
+from scipy import signal as sps
+from scipy.stats import kurtosis as _kurtosis
+from scipy.stats import skew as _skew
 
-# List of input raw fields expected from telemetry stream or CSV
-RAW_FEATURE_COLUMNS = [
-    "type",  # 'L', 'M', or 'H'
-    "air_temp",  # Kelvin
-    "process_temp",  # Kelvin
-    "rpm",  # Rotational speed [rpm]
-    "torque",  # Torque [Nm]
-    "tool_wear",  # Tool wear [min]
+TARGET_FS = 12000
+
+BAND_EDGES = [0, 500, 1000, 2000, 3000, 4000, 6000]
+BAND_NAMES = [f"band_{lo}_{hi}" for lo, hi in zip(BAND_EDGES[:-1], BAND_EDGES[1:])]
+
+TIME_FEATURES = [
+    "rms", "peak_to_peak", "crest_factor", "kurtosis", "skewness",
+    "shape_factor", "impulse_factor", "zero_cross_rate",
 ]
+FREQ_FEATURES = ["spectral_centroid"] + BAND_NAMES
+ENVELOPE_FEATURES = ["env_bpfo", "env_bpfi", "env_bsf"]
 
-# Engineered feature names produced by the transformer
-ENGINEERED_FEATURE_NAMES = [
-    "air_temp",
-    "process_temp",
-    "rpm",
-    "torque",
-    "tool_wear",
-    "temp_diff",
-    "power_w",
-    "wear_torque",
-    "type_L",
-    "type_M",
-    "type_H",
-]
+FEATURE_NAMES = TIME_FEATURES + FREQ_FEATURES + ENVELOPE_FEATURES
+ENGINEERED_FEATURE_NAMES = FEATURE_NAMES  # backwards-compatible alias
 
-# Columns that MUST be excluded from ML inputs to avoid target leakage
+# Bearing defect frequencies as multiples of shaft speed (SKF 6205-2RS drive-end bearing).
+DEFECT_ORDERS = {"env_bpfo": 3.5848, "env_bpfi": 5.4152, "env_bsf": 4.7135}
+
+# Columns that must never be fed to a model.
 EXCLUDE_COLUMNS = [
-    "UDI",
-    "udi",
-    "Product ID",
-    "product_id",
-    "Machine failure",
-    "machine_failure",
-    "label",
-    "TWF",
-    "twf",
-    "HDF",
-    "hdf",
-    "PWF",
-    "pwf",
-    "OSF",
-    "osf",
-    "RNF",
-    "rnf",
+    "label", "class_id", "class_name", "true_class", "source_file", "file_id",
+    "win_idx", "split", "load_hp", "rpm", "t",
 ]
+
+_ENV_SOS = sps.butter(4, [2000, 5500], btype="bandpass", fs=TARGET_FS, output="sos")
+
+
+def _envelope_features(x: np.ndarray, fs: float, rpm: float) -> Dict[str, float]:
+    env = np.abs(sps.hilbert(sps.sosfiltfilt(_ENV_SOS, x)))
+    env = env - env.mean()
+    spec = np.abs(np.fft.rfft(env * np.hanning(len(env)))) / len(env)
+    freqs = np.fft.rfftfreq(len(env), d=1.0 / fs)
+    ref_mask = (freqs >= 10) & (freqs <= 600)
+    noise = float(np.median(spec[ref_mask])) + 1e-12
+    shaft_hz = rpm / 60.0
+    out = {}
+    for name, order in DEFECT_ORDERS.items():
+        best = 0.0
+        for harmonic in (1, 2):
+            f0 = order * shaft_hz * harmonic
+            m = (freqs >= f0 * 0.95) & (freqs <= f0 * 1.05)
+            if m.any():
+                best = max(best, float(spec[m].max()))
+        out[name] = best / noise
+    return out
+
+
+def extract_features(window: np.ndarray, fs: float = TARGET_FS, rpm: float = 1797.0) -> Dict[str, float]:
+    """Feature dict (keys == FEATURE_NAMES) for one window of raw acceleration."""
+    x = np.asarray(window, dtype=np.float64).ravel()
+    if x.size < 256 or not np.all(np.isfinite(x)):
+        raise ValueError("Window must contain >= 256 finite samples")
+    x = x - x.mean()
+
+    rms = float(np.sqrt(np.mean(x ** 2)))
+    peak = float(np.max(np.abs(x)))
+    mean_abs = float(np.mean(np.abs(x))) + 1e-12
+    rms_safe = rms + 1e-12
+
+    feats: Dict[str, float] = {
+        "rms": rms,
+        "peak_to_peak": float(x.max() - x.min()),
+        "crest_factor": peak / rms_safe,
+        "kurtosis": float(_kurtosis(x, fisher=False)),  # Gaussian noise ~ 3
+        "skewness": float(_skew(x)),
+        "shape_factor": rms / mean_abs,
+        "impulse_factor": peak / mean_abs,
+        "zero_cross_rate": float(np.mean(np.abs(np.diff(np.sign(x))) > 0)),
+    }
+
+    spec = np.abs(np.fft.rfft(x * np.hanning(len(x)))) ** 2
+    freqs = np.fft.rfftfreq(len(x), d=1.0 / fs)
+    total = float(spec.sum()) + 1e-12
+    feats["spectral_centroid"] = float((freqs * spec).sum() / total)
+    for name, lo, hi in zip(BAND_NAMES, BAND_EDGES[:-1], BAND_EDGES[1:]):
+        m = (freqs >= lo) & (freqs < hi) if hi < fs / 2 else (freqs >= lo)
+        feats[name] = float(spec[m].sum() / total)
+
+    feats.update(_envelope_features(x, fs, rpm))
+    return {k: feats[k] for k in FEATURE_NAMES}
+
+
+def features_to_frame(feats: Mapping[str, float]) -> pd.DataFrame:
+    """Single feature dict (e.g. an MQTT payload) -> 1-row DataFrame in model column order."""
+    missing = [k for k in FEATURE_NAMES if k not in feats]
+    if missing:
+        raise ValueError(f"Missing features: {missing}")
+    row = [float(feats[k]) for k in FEATURE_NAMES]
+    if not np.all(np.isfinite(row)):
+        raise ValueError("Non-finite feature value in payload")
+    return pd.DataFrame([row], columns=FEATURE_NAMES)
 
 
 def create_features_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transforms a DataFrame with raw or standardized columns into a feature DataFrame
-    suitable for model training and prediction.
-
-    Accepts original UCI column names or standardized pythonic column names.
-    """
-    data = df.copy()
-
-    # Normalize column names if raw UCI names are passed
-    rename_map = {
-        "Type": "type",
-        "Air temperature [K]": "air_temp",
-        "Process temperature [K]": "process_temp",
-        "Rotational speed [rpm]": "rpm",
-        "Torque [Nm]": "torque",
-        "Tool wear [min]": "tool_wear",
-    }
-    for old_col, new_col in rename_map.items():
-        if old_col in data.columns and new_col not in data.columns:
-            data[new_col] = data[old_col]
-
-    # Domain-specific feature engineering
-    # 1. Temperature difference (Process temp - Air temp)
-    data["temp_diff"] = data["process_temp"] - data["air_temp"]
-
-    # 2. Mechanical power in Watts: P = Torque (Nm) * Angular velocity (rad/s)
-    # Angular velocity = rpm * 2 * pi / 60
-    data["power_w"] = data["torque"] * data["rpm"] * (2 * math.pi / 60.0)
-
-    # 3. Cumulative wear-torque load product
-    data["wear_torque"] = data["tool_wear"] * data["torque"]
-
-    # One-hot encoding for machine Type (L, M, H)
-    data["type_L"] = (data["type"] == "L").astype(int)
-    data["type_M"] = (data["type"] == "M").astype(int)
-    data["type_H"] = (data["type"] == "H").astype(int)
-
-    # Return only the engineered feature columns in exact order
-    return data[ENGINEERED_FEATURE_NAMES]
-
-
-def create_features_single(raw_dict: Dict[str, Any]) -> np.ndarray:
-    """
-    Transforms a single telemetry reading dictionary into a 2D numpy array (1, n_features).
-
-    Expected keys in raw_dict (case-insensitive fallback provided):
-        'type', 'air_temp', 'process_temp', 'rpm', 'torque', 'tool_wear'
-    """
-    # Extract raw values with sensible defaults if missing
-    machine_type = str(raw_dict.get("type", raw_dict.get("Type", "M"))).upper()
-    air_temp = float(raw_dict.get("air_temp", raw_dict.get("Air temperature [K]", 298.0)))
-    process_temp = float(raw_dict.get("process_temp", raw_dict.get("Process temperature [K]", 308.0)))
-    rpm = float(raw_dict.get("rpm", raw_dict.get("Rotational speed [rpm]", 1500.0)))
-    torque = float(raw_dict.get("torque", raw_dict.get("Torque [Nm]", 40.0)))
-    tool_wear = float(raw_dict.get("tool_wear", raw_dict.get("Tool wear [min]", 0.0)))
-
-    # Engineered features
-    temp_diff = process_temp - air_temp
-    power_w = torque * rpm * (2 * math.pi / 60.0)
-    wear_torque = tool_wear * torque
-
-    type_L = 1 if machine_type == "L" else 0
-    type_M = 1 if machine_type == "M" else 0
-    type_H = 1 if machine_type == "H" else 0
-
-    features = [
-        air_temp,
-        process_temp,
-        rpm,
-        torque,
-        tool_wear,
-        temp_diff,
-        power_w,
-        wear_torque,
-        type_L,
-        type_M,
-        type_H,
-    ]
-
-    return pd.DataFrame([features], columns=ENGINEERED_FEATURE_NAMES)
-
-
-if __name__ == "__main__":
-    sample_record = {
-        "type": "L",
-        "air_temp": 298.1,
-        "process_temp": 308.6,
-        "rpm": 1551,
-        "torque": 42.8,
-        "tool_wear": 14,
-    }
-    arr = create_features_single(sample_record)
-    print("Single record features shape:", arr.shape)
-    print("Feature names:", ENGINEERED_FEATURE_NAMES)
-    print("Feature values:", arr[0].tolist())
+    """Select the model input columns from a window table, in canonical order."""
+    return df[FEATURE_NAMES].astype(float)

@@ -1,44 +1,44 @@
-# 🎬 DEMO & VIVA PRESENTATION GUIDE
+# DEMO & VIVA GUIDE
 
-**Project Title:** Digital Twin for Industrial Equipment Health Monitoring  
-**Student:** CSE (AI & ML) Final Year  
-**HCL Project List ID:** P_222  
+**Project:** Digital Twin for Bearing Health Monitoring (HCL P_222) · **Data:** CWRU Bearing Data Center (real vibration)
 
----
+## 3-minute demo
+**Minute 1 - problem and architecture.** Unplanned bearing failures stop machines. The twin receives vibration over MQTT,
+stores it in InfluxDB, diagnoses Normal / Inner-race / Ball / Outer-race with an ML model, and shows it live.
+Pipeline: Replay publisher -> Mosquitto -> Ingest + Inference services -> InfluxDB -> Grafana + Streamlit (all in Docker).
 
-## ⏱️ 3-Minute Viva Demonstration Script
+**Minute 2 - data and ML.**
+- Real accelerometer data from CWRU (drive end, 12 kHz). Normal files were recorded at 48 kHz and are resampled to 12 kHz.
+- 2048-sample windows -> 18 features: RMS, kurtosis, crest factor, band energies and *envelope-spectrum peaks at the
+  bearing defect frequencies* (BPFO/BPFI/ball). Labels, file IDs and shaft speed are not model inputs.
+- LightGBM chosen on the **validation** set; reported once on the **test** set: fault detection F1 = 1.00, 4-class
+  accuracy 100 %. Say immediately: *"this is with one recording per fault class, so fault windows come from different time
+  blocks of the same recording; normal is tested on a completely unseen recording (100.mat, 3 HP)."*
 
-### Minute 1: Problem & System Architecture (0:00 - 1:00)
-- **Opening**: *"Good morning examiners. My project is a deployable Digital Twin software system for real-time industrial equipment health monitoring."*
-- **Problem**: *"Unplanned machine downtime causes massive industrial losses. Traditional threshold alerts trigger too late. Our Digital Twin streams real-time sensor telemetry over MQTT, ingests it into InfluxDB, and scores failure probability live using a trained Random Forest classifier."*
-- **Architecture**: *"The pipeline consists of 5 containerized services: Replay Publisher -> Mosquitto MQTT Broker -> Ingest & ML Inference Service -> InfluxDB -> Grafana Live Ops & Streamlit Web Application."*
+**Minute 3 - live demo.**
+1. Streamlit **Live Monitor** (`:8501`): the status badge and diagnosis change as the scenario plays
+   (normal -> inner race -> ball -> outer race).
+2. **Fault Simulator**: choose `105.mat` (inner race), show waveform, spectrum and the envelope spectrum with the BPFI peak;
+   then add noise (SNR 10 dB) and show the model on `118.mat` (ball) becoming unreliable - an honest limitation.
+3. **Grafana** (`:3000`): failure risk vs thresholds, class probabilities, kurtosis, defect-frequency features.
 
-### Minute 2: Real-Data ML Performance & Dataset (1:00 - 2:00)
-- **Dataset**: *"We trained on the UCI AI4I 2020 Predictive Maintenance Dataset (10,000 records). It has a 3.39% failure rate."*
-- **Feature Engineering**: *"We engineered domain features including Temperature Difference, Mechanical Power ($P = \tau \cdot \omega$), and Wear-Torque Load ($ToolWear \cdot Torque$). Crucially, we excluded label-leaking columns like TWF, HDF, PWF to prevent data leakage."*
-- **ML Quality**: *"Due to extreme class imbalance, accuracy is misleading. Our Random Forest model achieved **95.74% Precision** and **88.24% Recall** (F1 = **0.9184**) on the untouched 15% Test set, outperforming Isolation Forest and LightGBM."*
+## Anticipated viva questions
+**Why does a 100 % score not prove the model works in the field?** Only one recording per fault class exists here, so
+fault train/test windows share the same recording (separated by time with a purge gap, no shared samples). A real test needs
+other loads, fault sizes or machines. Adding the CWRU files for loads 1-3 and 14-mil faults switches the split to whole-recording hold-out.
 
-### Minute 3: Live Demo & What-If Simulation (2:00 - 3:00)
-- **Streamlit Demo**: Open `http://localhost:8501`.
-  - Show **Live Monitor**: Point out status badge (`NORMAL` vs `CRITICAL`) changing in real time as dataset rows replay.
-  - Show **What-If Predictor**: Slide `Tool Wear` to 220 min and `Torque` to 65 Nm; demonstrate failure risk spiking to >90% and triggering a `CRITICAL` alert status.
-  - Show **Grafana Dashboard**: Open `http://localhost:3000` to show provisioned Flux time-series graphs.
+**How did you prevent leakage?** Windows overlap 75 %, so random splitting would put near-duplicates in train and test. I split by
+time block with a gap larger than a window (faults) or by whole recording (normal). Model inputs exclude file ID, label, load and RPM.
+Model selection used validation data only.
 
----
+**Why kurtosis and envelope analysis?** A defect produces periodic impacts that excite a structural resonance. Impacts make the
+signal impulsive (kurtosis rises above 3) and the *envelope* of the high-frequency band repeats at BPFO/BPFI/ball-defect frequency.
 
-## ❓ Top Anticipated Viva Questions & Answers
+**Why 1 - P(normal) as failure probability?** The model is 4-class; the probability of "not normal" is the natural fault score and is
+thresholded on validation data. Status: NORMAL < 0.30, WARNING 0.30-0.50, CRITICAL >= 0.50.
 
-### Q1: Why use F1-score and PR-AUC instead of Accuracy?
-> **Answer**: In our dataset of 10,000 records, only 339 (3.39%) are failure cases. A naive model that predicts "Normal" 100% of the time would get 96.61% accuracy, but would catch 0 failures. Precision, Recall, and F1 score specifically measure performance on the rare failure class.
+**What do MQTT and InfluxDB do?** MQTT is a lightweight publish/subscribe transport for sensor streams. InfluxDB stores timestamped
+telemetry and predictions and serves Flux window aggregations to Grafana.
 
-### Q2: How did you handle data leakage in feature engineering?
-> **Answer**: The dataset includes columns `TWF`, `HDF`, `PWF`, `OSF`, `RNF` which indicate the specific mode of failure *after* failure occurs. If included in ML inputs, the model would achieve artificial 100% accuracy. We strictly dropped `UDI`, `Product ID`, and all 5 failure mode flags from model training.
-
-### Q3: What is the role of MQTT and InfluxDB in a Digital Twin?
-> **Answer**: MQTT is a lightweight publish-subscribe protocol ideal for high-frequency IoT sensor streaming. InfluxDB is a time-series database optimized for storing append-only sensor timestamps and executing fast Flux window aggregations.
-
-### Q4: How does the Digital Twin classify machine status (NORMAL / WARNING / CRITICAL)?
-> **Answer**: The ML model computes a continuous failure probability $p \in [0, 1]$. Using validation threshold tuning, $p < 0.25$ is categorized as `NORMAL`, $0.25 \le p < 0.43$ as `WARNING`, and $p \ge 0.43$ as `CRITICAL`.
-
-### Q5: Is the AI4I 2020 dataset real field data?
-> **Answer**: UCI documents the AI4I 2020 dataset as a synthetic benchmark dataset modeled on real industrial predictive maintenance behavior. In our project report limitations, we note that validating on physical measured testbed data (such as the CWRU bearing dataset) is future scope.
+**What is weak?** Ball faults (weakest signature, 27 % accuracy at 10 dB SNR in my stress test), single bearing type, lab data, and
+an accelerated replay rather than a physical sensor.

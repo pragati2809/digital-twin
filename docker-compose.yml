@@ -1,105 +1,133 @@
-version: '3.8'
+# Bearing-health digital twin: MQTT -> ingest + inference -> InfluxDB -> Grafana / Streamlit
+# Secrets come from .env (see .env.example); the defaults below are for local demos only.
+
+x-app: &app
+  image: digital-twin:latest
+  build: .
+  restart: unless-stopped
+
+x-influx-env: &influx-env
+  INFLUX_URL: http://influxdb:8086
+  INFLUX_TOKEN: ${INFLUX_TOKEN:-my-super-secret-auth-token}
+  INFLUX_ORG: ${INFLUX_ORG:-digital-twin-org}
+  INFLUX_BUCKET: ${INFLUX_BUCKET:-machine_data}
+  MACHINE_ID: ${MACHINE_ID:-bearing_de_01}
 
 services:
   mosquitto:
-    image: eclipse-mosquitto:latest
-    container_name: strange_varahamihira
+    image: eclipse-mosquitto:2
+    container_name: dt_mosquitto
     ports:
-      - "1883:1883"
+      - "127.0.0.1:1883:1883"   # broker is anonymous: keep it off the public interface
     volumes:
-      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t '$$SYS/#' -C 1 -W 3 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   influxdb:
     image: influxdb:2.7
-    container_name: condescending_carson
+    container_name: dt_influxdb
     ports:
-      - "8086:8086"
+      - "127.0.0.1:8086:8086"
     environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword123
-      - DOCKER_INFLUXDB_INIT_ORG=digital-twin-org
-      - DOCKER_INFLUXDB_INIT_BUCKET=machine_data
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD:-adminpassword123}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-digital-twin-org}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-machine_data}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:-my-super-secret-auth-token}
     volumes:
       - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:latest
-    container_name: eloquent_hellman
+    container_name: dt_grafana
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:-my-super-secret-auth-token}   # expanded in provisioning/datasources
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
-      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana/provisioning/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
-      - influxdb
-    restart: unless-stopped
-
-  replay:
-    build: .
-    container_name: dt_replay_publisher
-    command: python src/replay_publisher.py --rate 1.0 --host mosquitto
-    environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-    depends_on:
-      - mosquitto
+      influxdb:
+        condition: service_healthy
     restart: unless-stopped
 
   ingest:
-    build: .
-    container_name: dt_ingest_service
+    <<: *app
+    container_name: dt_ingest
     command: python ingest.py
     environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=my-super-secret-auth-token
-      - INFLUX_ORG=digital-twin-org
-      - INFLUX_BUCKET=machine_data
+      <<: *influx-env
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
     depends_on:
-      - mosquitto
-      - influxdb
-    restart: unless-stopped
+      mosquitto:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
 
   inference:
-    build: .
-    container_name: dt_inference_service
+    <<: *app
+    container_name: dt_inference
     command: python src/inference_service.py
     environment:
-      - MQTT_HOST=mosquitto
-      - MQTT_PORT=1883
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=my-super-secret-auth-token
-      - INFLUX_ORG=digital-twin-org
-      - INFLUX_BUCKET=machine_data
+      <<: *influx-env
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
     depends_on:
-      - mosquitto
-      - influxdb
-    restart: unless-stopped
+      mosquitto:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+
+  replay:
+    <<: *app
+    container_name: dt_replay
+    command: python src/replay_publisher.py --rate 1.0 --host mosquitto --scenario demo --split test
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      inference:
+        condition: service_started
+      ingest:
+        condition: service_started
 
   streamlit:
-    build: .
-    container_name: dt_streamlit_dashboard
+    <<: *app
+    container_name: dt_streamlit
     command: streamlit run app/streamlit_app.py --server.port=8501 --server.address=0.0.0.0
     ports:
       - "8501:8501"
     environment:
-      - INFLUX_URL=http://influxdb:8086
-      - INFLUX_TOKEN=my-super-secret-auth-token
-      - INFLUX_ORG=digital-twin-org
-      - INFLUX_BUCKET=machine_data
+      <<: *influx-env
+      AUTO_REFRESH: ${AUTO_REFRESH:-1}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     depends_on:
-      - influxdb
-    restart: unless-stopped
+      influxdb:
+        condition: service_healthy
 
 volumes:
   influxdb_data:

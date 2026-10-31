@@ -1,34 +1,212 @@
 {
-  "best_model_name": "Random Forest",
+  "best_model_name": "LightGBM",
+  "dataset": "CWRU Bearing Data Center, drive-end accelerometer, resampled to 12 kHz",
   "feature_names": [
-    "air_temp",
-    "process_temp",
-    "rpm",
-    "torque",
-    "tool_wear",
-    "temp_diff",
-    "power_w",
-    "wear_torque",
-    "type_L",
-    "type_M",
-    "type_H"
+    "rms",
+    "peak_to_peak",
+    "crest_factor",
+    "kurtosis",
+    "skewness",
+    "shape_factor",
+    "impulse_factor",
+    "zero_cross_rate",
+    "spectral_centroid",
+    "band_0_500",
+    "band_500_1000",
+    "band_1000_2000",
+    "band_2000_3000",
+    "band_3000_4000",
+    "band_4000_6000",
+    "env_bpfo",
+    "env_bpfi",
+    "env_bsf"
   ],
-  "optimal_threshold": 0.42999999999999994,
-  "metrics_test": {
-    "precision": 0.9574,
-    "recall": 0.8824,
-    "f1": 0.9184,
-    "roc_auc": 0.9747,
-    "pr_auc": 0.9303,
-    "tn": 1447,
-    "fp": 2,
-    "fn": 6,
-    "tp": 45,
-    "threshold": 0.43
+  "class_names": [
+    "normal",
+    "inner_race",
+    "ball",
+    "outer_race"
+  ],
+  "class_labels": {
+    "normal": "Normal",
+    "inner_race": "Inner Race Fault",
+    "ball": "Ball Fault",
+    "outer_race": "Outer Race Fault"
   },
+  "window_size": 2048,
+  "window_stride": 512,
+  "sample_rate_hz": 12000,
+  "optimal_threshold": 0.5,
+  "metrics_test": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "roc_auc": 1.0,
+    "pr_auc": 1.0,
+    "tn": 234,
+    "fp": 0,
+    "fn": 0,
+    "tp": 119,
+    "threshold": 0.5
+  },
+  "metrics_test_refit_all_train_val": {
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "roc_auc": 1.0,
+    "pr_auc": 1.0,
+    "tn": 234,
+    "fp": 0,
+    "fn": 0,
+    "tp": 119,
+    "threshold": 0.5
+  },
+  "metrics_test_4class": {
+    "accuracy": 1.0,
+    "macro_f1": 1.0
+  },
+  "confusion_matrix_4class": [
+    [
+      234,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      40,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      40,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      39
+    ]
+  ],
   "status_thresholds": {
-    "normal_max": 0.258,
-    "warning_max": 0.43,
-    "critical_min": 0.43
+    "normal_max": 0.3,
+    "warning_max": 0.5,
+    "critical_min": 0.5
+  },
+  "split_protocol": "normal: 4 recording(s) -> recording-level; inner_race: 1 recording(s) -> time-block (purged); ball: 1 recording(s) -> time-block (purged); outer_race: 1 recording(s) -> time-block (purged)",
+  "split_sizes": {
+    "train": {
+      "normal": 349,
+      "ball": 141,
+      "outer_race": 141,
+      "inner_race": 139
+    },
+    "val": {
+      "normal": 233,
+      "ball": 47,
+      "outer_race": 47,
+      "inner_race": 46
+    },
+    "test": {
+      "normal": 234,
+      "inner_race": 40,
+      "ball": 40,
+      "outer_race": 39
+    }
+  },
+  "recordings": [
+    {
+      "file": "97.mat",
+      "class": "Normal",
+      "load_hp": 0,
+      "fault_size_in": 0.0,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 48000,
+      "samples_12k": 60985,
+      "duration_s": 5.08,
+      "channel": "X097_DE_time"
+    },
+    {
+      "file": "98.mat",
+      "class": "Normal",
+      "load_hp": 1,
+      "fault_size_in": 0.0,
+      "rpm": 1772.0,
+      "rpm_source": "default",
+      "original_fs_hz": 48000,
+      "samples_12k": 120976,
+      "duration_s": 10.08,
+      "channel": "X098_DE_time"
+    },
+    {
+      "file": "99.mat",
+      "class": "Normal",
+      "load_hp": 2,
+      "fault_size_in": 0.0,
+      "rpm": 1750.0,
+      "rpm_source": "default",
+      "original_fs_hz": 48000,
+      "samples_12k": 121266,
+      "duration_s": 10.11,
+      "channel": "X099_DE_time"
+    },
+    {
+      "file": "100.mat",
+      "class": "Normal",
+      "load_hp": 3,
+      "fault_size_in": 0.0,
+      "rpm": 1725.0,
+      "rpm_source": "file",
+      "original_fs_hz": 48000,
+      "samples_12k": 121411,
+      "duration_s": 10.12,
+      "channel": "X100_DE_time"
+    },
+    {
+      "file": "105.mat",
+      "class": "Inner Race Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1797.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 121265,
+      "duration_s": 10.11,
+      "channel": "X105_DE_time"
+    },
+    {
+      "file": "118.mat",
+      "class": "Ball Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 122571,
+      "duration_s": 10.21,
+      "channel": "X118_DE_time"
+    },
+    {
+      "file": "130.mat",
+      "class": "Outer Race Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 121991,
+      "duration_s": 10.17,
+      "channel": "X130_DE_time"
+    }
+  ],
+  "caveat": "Only one recording per fault class (0.007in, 0 HP). Fault test windows come from later time blocks of the SAME recordings (purged gap, no shared samples); the normal class is tested on an entire unseen recording/load. Add more CWRU fault files (other loads / sizes) and re-run training for a recording-level fault evaluation.",
+  "library_versions": {
+    "scikit-learn": "1.8.0",
+    "numpy": "2.4.4",
+    "pandas": "3.0.2"
   }
 }

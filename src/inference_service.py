@@ -1,9 +1,10 @@
 """
-Real-time Machine Health Inference Service & Digital Twin State Manager.
+Real-time bearing-health inference service & digital-twin state.
 
-Subscribes to 'machine/telemetry', transforms sensor features, scores failure risk
-with the trained ML pipeline, writes predictions to InfluxDB measurement 'health',
-and publishes health alerts to MQTT topic 'machine/health'.
+Subscribes to 'machine/telemetry', scores each vibration window with the trained model,
+writes predictions to InfluxDB measurement 'health' and publishes alerts to 'machine/health'.
+
+failure_prob = 1 - P(normal);  fault_type = argmax of the 4-class probabilities.
 """
 
 import json
@@ -12,210 +13,193 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import joblib
-import numpy as np
 import paho.mqtt.client as mqtt
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# Add project root directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.features import create_features_single, ENGINEERED_FEATURE_NAMES
+from src.features import FEATURE_NAMES, features_to_frame
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] (InferenceService) %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (InferenceService) %(message)s")
 logger = logging.getLogger(__name__)
 
-# Read environment variables
 INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "my-super-secret-auth-token")
 INFLUX_ORG = os.getenv("INFLUX_ORG", "digital-twin-org")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "machine_data")
 INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MACHINE_ID = os.getenv("MACHINE_ID", "bearing_de_01")
 
 MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "best_model.joblib"))
 METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "metadata.json"))
 
+STATUS_CODES = {"NORMAL": 0, "WARNING": 1, "CRITICAL": 2}
+# Extra features copied into the 'health' measurement so one query gives the dashboard everything.
+HEALTH_ECHO_FIELDS = ["rms", "kurtosis", "crest_factor", "peak_to_peak", "env_bpfo", "env_bpfi", "env_bsf"]
+
 
 class DigitalTwinState:
-    """
-    In-memory representation of the Digital Twin's operational state.
-    """
+    """In-memory representation of the twin's operational state."""
+
     def __init__(self):
         self.last_updated: Optional[datetime] = None
-        self.tick_count: int = 0
-        self.machine_type: str = "M"
+        self.tick_count = 0
         self.latest_telemetry: Dict[str, Any] = {}
         self.latest_prediction: Dict[str, Any] = {}
-        self.status: str = "NORMAL"
-        self.status_code: int = 0  # 0: NORMAL, 1: WARNING, 2: CRITICAL
-        self.total_alerts: int = 0
+        self.status = "NORMAL"
+        self.status_code = 0
+        self.total_alerts = 0
 
     def update(self, telemetry: Dict[str, Any], prediction: Dict[str, Any]):
         self.last_updated = datetime.now(timezone.utc)
-        self.tick_count = telemetry.get("t", self.tick_count + 1)
-        self.machine_type = str(telemetry.get("type", "M")).upper()
+        self.tick_count = int(telemetry.get("t", self.tick_count + 1))
         self.latest_telemetry = telemetry
         self.latest_prediction = prediction
-        self.status = prediction.get("status", "NORMAL")
-        
-        status_map = {"NORMAL": 0, "WARNING": 1, "CRITICAL": 2}
-        self.status_code = status_map.get(self.status, 0)
-        
-        if self.status in ["WARNING", "CRITICAL"]:
+        self.status = prediction["status"]
+        self.status_code = STATUS_CODES[self.status]
+        if self.status != "NORMAL":
             self.total_alerts += 1
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "tick": self.tick_count,
-            "machine_type": self.machine_type,
             "status": self.status,
             "status_code": self.status_code,
             "total_alerts": self.total_alerts,
             "last_updated": self.last_updated.isoformat() if self.last_updated else None,
-            "telemetry": self.latest_telemetry,
             "prediction": self.latest_prediction,
         }
 
 
 class InferenceService:
-    def __init__(self, model_path: str = MODEL_PATH, metadata_path: str = METADATA_PATH):
+    def __init__(self, model_path: str = MODEL_PATH, metadata_path: str = METADATA_PATH, connect_influx: bool = True):
         self.twin_state = DigitalTwinState()
-        self.model_pipeline = None
-        self.metadata = {}
-        self.threshold = 0.43
-        self.normal_max = 0.25
-        self.warning_max = 0.43
-
+        self.threshold = 0.5
+        self.normal_max = 0.3
+        self.warning_max = 0.5
+        self.write_api = None
         self.load_model_artifacts(model_path, metadata_path)
-        self.setup_influxdb()
+        if connect_influx:
+            self.setup_influxdb()
 
     def load_model_artifacts(self, model_path: str, metadata_path: str):
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Trained model artifact not found at '{model_path}'. Run src/train.py first.")
-
-        logger.info(f"Loading trained ML model pipeline from '{model_path}'...")
-        self.model_pipeline = joblib.load(model_path)
-
+            raise FileNotFoundError(f"Trained model not found at '{model_path}'. Run `python src/train.py` first.")
+        bundle = joblib.load(model_path)
+        self.pipeline = bundle["pipeline"]
+        self.class_names = list(bundle["class_names"])
+        self.feature_names = list(bundle["feature_names"])
+        if self.feature_names != FEATURE_NAMES:
+            raise RuntimeError("Model feature list differs from src/features.py - retrain the model.")
+        self.normal_idx = self.class_names.index("normal")
         if os.path.exists(metadata_path):
-            with open(metadata_path, "r") as f:
-                self.metadata = json.load(f)
-            self.threshold = float(self.metadata.get("optimal_threshold", 0.43))
-            status_th = self.metadata.get("status_thresholds", {})
-            self.normal_max = float(status_th.get("normal_max", self.threshold * 0.6))
-            self.warning_max = float(status_th.get("warning_max", self.threshold))
-            logger.info(f"Loaded metadata. Optimal Threshold={self.threshold:.4f}, NormalMax={self.normal_max:.4f}, WarningMax={self.warning_max:.4f}")
-        else:
-            logger.warning(f"Metadata file not found at '{metadata_path}'. Using default threshold={self.threshold}")
+            with open(metadata_path) as f:
+                meta = json.load(f)
+            self.threshold = float(meta.get("optimal_threshold", self.threshold))
+            th = meta.get("status_thresholds", {})
+            self.normal_max = float(th.get("normal_max", self.threshold * 0.6))
+            self.warning_max = float(th.get("warning_max", self.threshold))
+        logger.info(f"Loaded '{bundle.get('model_name', 'model')}' (alarm threshold {self.threshold:.2f})")
 
     def setup_influxdb(self):
         try:
             self.influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
             self.write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
-            logger.info(f"Connected to InfluxDB at {INFLUX_URL}")
+            logger.info(f"InfluxDB client ready for {INFLUX_URL}")
         except Exception as e:
-            logger.error(f"Failed to initialize InfluxDB client: {e}")
-            self.write_api = None
+            logger.error(f"Failed to initialise InfluxDB client: {e}")
 
-    def predict(self, raw_telemetry: Dict[str, Any]) -> Dict[str, Any]:
-        features_arr = create_features_single(raw_telemetry)
-
-        # Failure probability estimation
-        if hasattr(self.model_pipeline, "predict_proba"):
-            proba = float(self.model_pipeline.predict_proba(features_arr)[0, 1])
-        else:
-            proba = float(self.model_pipeline.predict(features_arr)[0])
-
-        anomaly_score = round(proba, 4)
-        predicted_failure = 1 if proba >= self.threshold else 0
-
-        # Status categorization
-        if proba < self.normal_max:
+    def predict(self, telemetry: Dict[str, Any]) -> Dict[str, Any]:
+        proba = self.pipeline.predict_proba(features_to_frame(telemetry))[0]
+        p_fault = float(1.0 - proba[self.normal_idx])
+        cls_idx = int(proba.argmax())
+        if p_fault < self.normal_max:
             status = "NORMAL"
-        elif proba < self.warning_max:
+        elif p_fault < self.warning_max:
             status = "WARNING"
         else:
             status = "CRITICAL"
-
         return {
-            "failure_prob": round(proba, 4),
-            "anomaly_score": anomaly_score,
-            "predicted_failure": predicted_failure,
+            "failure_prob": round(p_fault, 4),
+            "anomaly_score": round(p_fault, 4),
+            "predicted_failure": int(p_fault >= self.threshold),
+            "pred_class": cls_idx,
+            "fault_type": self.class_names[cls_idx],
+            "class_probs": {n: round(float(p), 4) for n, p in zip(self.class_names, proba)},
             "status": status,
             "threshold": self.threshold,
         }
 
-    def process_telemetry(self, mqtt_client: mqtt.Client, payload_bytes: bytes):
+    def process_telemetry(self, mqtt_client, payload_bytes: bytes):
         try:
             telemetry = json.loads(payload_bytes.decode("utf-8"))
             pred = self.predict(telemetry)
             self.twin_state.update(telemetry, pred)
 
-            # Write to InfluxDB measurement 'health'
             if self.write_api:
                 point = (
                     Point("health")
-                    .tag("type", self.twin_state.machine_type)
+                    .tag("machine", MACHINE_ID)
                     .tag("status", pred["status"])
+                    .tag("fault_type", pred["fault_type"])
                     .field("failure_prob", pred["failure_prob"])
                     .field("anomaly_score", pred["anomaly_score"])
                     .field("predicted_failure", pred["predicted_failure"])
                     .field("status_code", self.twin_state.status_code)
+                    .field("pred_class", pred["pred_class"])
                     .field("label", int(telemetry.get("label", 0)))
+                    .field("true_class", int(telemetry.get("true_class", 0)))
+                    .field("rpm", float(telemetry.get("rpm", 0.0)))
                 )
-                self.write_api.write(bucket=INFLUX_BUCKET, record=point)
+                for name, p in pred["class_probs"].items():
+                    point = point.field(f"p_{name}", float(p))
+                for name in HEALTH_ECHO_FIELDS:
+                    point = point.field(name, float(telemetry[name]))
+                try:
+                    self.write_api.write(bucket=INFLUX_BUCKET, record=point)
+                except Exception as e:
+                    logger.error(f"InfluxDB write failed: {e}")
 
-            # Publish prediction to MQTT topic 'machine/health'
-            health_payload = {
+            mqtt_client.publish("machine/health", json.dumps({
                 "t": self.twin_state.tick_count,
-                "type": self.twin_state.machine_type,
                 "failure_prob": pred["failure_prob"],
                 "predicted_failure": pred["predicted_failure"],
+                "fault_type": pred["fault_type"],
                 "status": pred["status"],
                 "status_code": self.twin_state.status_code,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            mqtt_client.publish("machine/health", json.dumps(health_payload), qos=0)
+            }), qos=0)
 
-            # Log heartbeat or critical alert
-            if pred["status"] in ["WARNING", "CRITICAL"] or self.twin_state.tick_count % 10 == 0:
-                alert_str = " [*** ALERT CRITICAL ***]" if pred["status"] == "CRITICAL" else ""
-                logger.info(f"Tick {self.twin_state.tick_count}: Status={pred['status']} (Prob={pred['failure_prob']:.4f}, Thresh={self.threshold:.2f}){alert_str}")
-
+            if pred["status"] != "NORMAL" or self.twin_state.tick_count % 10 == 0:
+                logger.info(f"t={self.twin_state.tick_count}: {pred['status']} fault={pred['fault_type']} "
+                            f"p={pred['failure_prob']:.3f} (true={telemetry.get('true_class_name', '?')})")
         except Exception as e:
             logger.error(f"Error in inference pipeline: {e}", exc_info=True)
 
 
 def run_inference_service():
     service = InferenceService()
-    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
-    def on_connect(client, userdata, flags, rc, properties=None):
+    def on_connect(c, userdata, flags, rc, properties=None):
         if rc == 0:
             logger.info(f"Connected to MQTT Broker at {MQTT_HOST}:{MQTT_PORT}")
-            client.subscribe("machine/telemetry")
-            logger.info("Subscribed to MQTT topic 'machine/telemetry'")
+            c.subscribe("machine/telemetry")
         else:
             logger.error(f"Failed to connect to MQTT Broker, return code: {rc}")
 
-    def on_message(client, userdata, msg):
-        service.process_telemetry(client, msg.payload)
+    client.on_connect = on_connect
+    client.on_message = lambda c, u, msg: service.process_telemetry(c, msg.payload)
 
-    mqtt_client.on_connect = on_connect
-    mqtt_client.on_message = on_message
-
-    logger.info("Starting Inference Service loop...")
     while True:
         try:
-            mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
-            mqtt_client.loop_forever()
+            client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+            client.loop_forever()
         except Exception as e:
             logger.warning(f"MQTT connection error: {e}. Retrying in 5 seconds...")
             time.sleep(5)

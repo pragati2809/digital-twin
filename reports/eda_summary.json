@@ -1,189 +1,179 @@
 {
-  "total_records": 10000,
-  "normal_records": 9661,
-  "failure_records": 339,
-  "failure_rate_pct": 3.39,
-  "type_summary": [
+  "recordings": [
     {
-      "type": "H",
-      "total": 1003,
-      "failures": 21,
-      "failure_rate_pct": 2.0937188434695915
+      "file": "97.mat",
+      "class": "Normal",
+      "load_hp": 0,
+      "fault_size_in": 0.0,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 48000,
+      "samples_12k": 60985,
+      "duration_s": 5.08,
+      "channel": "X097_DE_time"
     },
     {
-      "type": "L",
-      "total": 6000,
-      "failures": 235,
-      "failure_rate_pct": 3.916666666666667
+      "file": "98.mat",
+      "class": "Normal",
+      "load_hp": 1,
+      "fault_size_in": 0.0,
+      "rpm": 1772.0,
+      "rpm_source": "default",
+      "original_fs_hz": 48000,
+      "samples_12k": 120976,
+      "duration_s": 10.08,
+      "channel": "X098_DE_time"
     },
     {
-      "type": "M",
-      "total": 2997,
-      "failures": 83,
-      "failure_rate_pct": 2.7694361027694363
+      "file": "99.mat",
+      "class": "Normal",
+      "load_hp": 2,
+      "fault_size_in": 0.0,
+      "rpm": 1750.0,
+      "rpm_source": "default",
+      "original_fs_hz": 48000,
+      "samples_12k": 121266,
+      "duration_s": 10.11,
+      "channel": "X099_DE_time"
+    },
+    {
+      "file": "100.mat",
+      "class": "Normal",
+      "load_hp": 3,
+      "fault_size_in": 0.0,
+      "rpm": 1725.0,
+      "rpm_source": "file",
+      "original_fs_hz": 48000,
+      "samples_12k": 121411,
+      "duration_s": 10.12,
+      "channel": "X100_DE_time"
+    },
+    {
+      "file": "105.mat",
+      "class": "Inner Race Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1797.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 121265,
+      "duration_s": 10.11,
+      "channel": "X105_DE_time"
+    },
+    {
+      "file": "118.mat",
+      "class": "Ball Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 122571,
+      "duration_s": 10.21,
+      "channel": "X118_DE_time"
+    },
+    {
+      "file": "130.mat",
+      "class": "Outer Race Fault",
+      "load_hp": 0,
+      "fault_size_in": 0.007,
+      "rpm": 1796.0,
+      "rpm_source": "file",
+      "original_fs_hz": 12000,
+      "samples_12k": 121991,
+      "duration_s": 10.17,
+      "channel": "X130_DE_time"
     }
   ],
-  "failure_mode_counts": {
-    "TWF": 46,
-    "HDF": 115,
-    "PWF": 95,
-    "OSF": 98,
-    "RNF": 19
+  "windows_total": 1520,
+  "windows_per_class": {
+    "normal": 816,
+    "ball": 236,
+    "outer_race": 235,
+    "inner_race": 233
   },
-  "overall_stats": {
-    "air_temp": {
-      "count": 10000.0,
-      "mean": 300.00493,
-      "std": 2.000258682915751,
-      "min": 295.3,
-      "25%": 298.3,
-      "50%": 300.1,
-      "75%": 301.5,
-      "max": 304.5
+  "window_samples": 2048,
+  "n_features": 18,
+  "feature_class_means": {
+    "ball": {
+      "rms": 0.1386,
+      "peak_to_peak": 0.9411,
+      "crest_factor": 3.5539,
+      "kurtosis": 2.9636,
+      "skewness": -0.0094,
+      "shape_factor": 1.252,
+      "impulse_factor": 4.4501,
+      "zero_cross_rate": 0.5066,
+      "spectral_centroid": 2999.9055,
+      "band_0_500": 0.0185,
+      "band_500_1000": 0.0393,
+      "band_1000_2000": 0.0342,
+      "band_2000_3000": 0.1901,
+      "band_3000_4000": 0.7119,
+      "band_4000_6000": 0.0061,
+      "env_bpfo": 2.5535,
+      "env_bpfi": 1.9741,
+      "env_bsf": 2.0112
     },
-    "process_temp": {
-      "count": 10000.0,
-      "mean": 310.00556,
-      "std": 1.4837342191657208,
-      "min": 305.7,
-      "25%": 308.8,
-      "50%": 310.1,
-      "75%": 311.1,
-      "max": 313.8
+    "inner_race": {
+      "rms": 0.2911,
+      "peak_to_peak": 2.6416,
+      "crest_factor": 5.0769,
+      "kurtosis": 5.3978,
+      "skewness": 0.1641,
+      "shape_factor": 1.3943,
+      "impulse_factor": 7.0798,
+      "zero_cross_rate": 0.4545,
+      "spectral_centroid": 2739.3721,
+      "band_0_500": 0.0089,
+      "band_500_1000": 0.0435,
+      "band_1000_2000": 0.1569,
+      "band_2000_3000": 0.3869,
+      "band_3000_4000": 0.3868,
+      "band_4000_6000": 0.0169,
+      "env_bpfo": 5.2634,
+      "env_bpfi": 13.352,
+      "env_bsf": 2.6141
     },
-    "rpm": {
-      "count": 10000.0,
-      "mean": 1538.7761,
-      "std": 179.2840959134266,
-      "min": 1168.0,
-      "25%": 1423.0,
-      "50%": 1503.0,
-      "75%": 1612.0,
-      "max": 2886.0
+    "normal": {
+      "rms": 0.0594,
+      "peak_to_peak": 0.4029,
+      "crest_factor": 3.5854,
+      "kurtosis": 2.9652,
+      "skewness": 0.0246,
+      "shape_factor": 1.2509,
+      "impulse_factor": 4.4858,
+      "zero_cross_rate": 0.4379,
+      "spectral_centroid": 2389.141,
+      "band_0_500": 0.2363,
+      "band_500_1000": 0.1508,
+      "band_1000_2000": 0.0819,
+      "band_2000_3000": 0.0825,
+      "band_3000_4000": 0.0543,
+      "band_4000_6000": 0.3942,
+      "env_bpfo": 2.249,
+      "env_bpfi": 1.7907,
+      "env_bsf": 1.8958
     },
-    "torque": {
-      "count": 10000.0,
-      "mean": 39.986909999999995,
-      "std": 9.968933725121337,
-      "min": 3.8,
-      "25%": 33.2,
-      "50%": 40.1,
-      "75%": 46.8,
-      "max": 76.6
-    },
-    "tool_wear": {
-      "count": 10000.0,
-      "mean": 107.951,
-      "std": 63.654146636636355,
-      "min": 0.0,
-      "25%": 53.0,
-      "50%": 108.0,
-      "75%": 162.0,
-      "max": 253.0
-    }
-  },
-  "normal_stats": {
-    "air_temp": {
-      "count": 9661.0,
-      "mean": 299.9739985508747,
-      "std": 1.9907479694438195,
-      "min": 295.3,
-      "25%": 298.3,
-      "50%": 300.0,
-      "75%": 301.5,
-      "max": 304.5
-    },
-    "process_temp": {
-      "count": 9661.0,
-      "mean": 309.9955698167891,
-      "std": 1.4868460647646984,
-      "min": 305.7,
-      "25%": 308.8,
-      "50%": 310.0,
-      "75%": 311.1,
-      "max": 313.8
-    },
-    "rpm": {
-      "count": 9661.0,
-      "mean": 1540.2600144912535,
-      "std": 167.39473403228345,
-      "min": 1168.0,
-      "25%": 1429.0,
-      "50%": 1507.0,
-      "75%": 1615.0,
-      "max": 2695.0
-    },
-    "torque": {
-      "count": 9661.0,
-      "mean": 39.62965531518477,
-      "std": 9.472080111077105,
-      "min": 12.6,
-      "25%": 33.1,
-      "50%": 39.9,
-      "75%": 46.3,
-      "max": 70.0
-    },
-    "tool_wear": {
-      "count": 9661.0,
-      "mean": 106.69371700652107,
-      "std": 62.94579046389409,
-      "min": 0.0,
-      "25%": 52.0,
-      "50%": 107.0,
-      "75%": 160.0,
-      "max": 246.0
-    }
-  },
-  "failure_stats": {
-    "air_temp": {
-      "count": 339.0,
-      "mean": 300.88643067846607,
-      "std": 2.071472606797602,
-      "min": 295.6,
-      "25%": 299.1,
-      "50%": 301.6,
-      "75%": 302.5,
-      "max": 304.4
-    },
-    "process_temp": {
-      "count": 339.0,
-      "mean": 310.2902654867257,
-      "std": 1.3636856993841047,
-      "min": 306.1,
-      "25%": 309.5,
-      "50%": 310.4,
-      "75%": 311.2,
-      "max": 313.7
-    },
-    "rpm": {
-      "count": 339.0,
-      "mean": 1496.486725663717,
-      "std": 384.94354727230365,
-      "min": 1181.0,
-      "25%": 1326.5,
-      "50%": 1365.0,
-      "75%": 1421.5,
-      "max": 2886.0
-    },
-    "torque": {
-      "count": 339.0,
-      "mean": 50.16814159292036,
-      "std": 16.374498133978197,
-      "min": 3.8,
-      "25%": 45.95,
-      "50%": 53.7,
-      "75%": 61.2,
-      "max": 76.6
-    },
-    "tool_wear": {
-      "count": 339.0,
-      "mean": 143.78171091445427,
-      "std": 72.75987593568681,
-      "min": 0.0,
-      "25%": 84.5,
-      "50%": 165.0,
-      "75%": 207.5,
-      "max": 253.0
+    "outer_race": {
+      "rms": 0.6685,
+      "peak_to_peak": 6.3274,
+      "crest_factor": 4.8762,
+      "kurtosis": 7.6291,
+      "skewness": 0.0564,
+      "shape_factor": 1.6513,
+      "impulse_factor": 8.0523,
+      "zero_cross_rate": 0.5216,
+      "spectral_centroid": 3260.8569,
+      "band_0_500": 0.0013,
+      "band_500_1000": 0.0043,
+      "band_1000_2000": 0.0034,
+      "band_2000_3000": 0.2499,
+      "band_3000_4000": 0.7304,
+      "band_4000_6000": 0.0108,
+      "env_bpfo": 21.9738,
+      "env_bpfi": 7.0956,
+      "env_bsf": 2.6301
     }
   }
 }

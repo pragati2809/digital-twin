@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+scripts/
+reports/
+models/
+data/ai4i2020.csv
+data/cwru_windows.csv
+*.md

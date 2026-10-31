@@ -1,62 +1,72 @@
-"""
-Unit tests for src/features.py
-"""
+"""Unit tests for src/features.py (vibration feature extraction)."""
 
-import os
-import sys
 import numpy as np
-import pandas as pd
+import pytest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from src.features import (DEFECT_ORDERS, EXCLUDE_COLUMNS, FEATURE_NAMES, TARGET_FS, extract_features,
+                          features_to_frame)
 
-from src.features import create_features_df, create_features_single, ENGINEERED_FEATURE_NAMES, EXCLUDE_COLUMNS
-
-
-def test_create_features_single():
-    sample_raw = {
-        "type": "L",
-        "air_temp": 298.1,
-        "process_temp": 308.6,
-        "rpm": 1551,
-        "torque": 42.8,
-        "tool_wear": 14,
-    }
-    arr = create_features_single(sample_raw)
-    assert isinstance(arr, pd.DataFrame)
-    assert arr.shape == (1, len(ENGINEERED_FEATURE_NAMES))
-
-    # temp_diff = 308.6 - 298.1 = 10.5
-    assert abs(arr.iloc[0]["temp_diff"] - 10.5) < 1e-4
-
-    # Type L should have type_L=1, type_M=0, type_H=0
-    assert arr.iloc[0]["type_L"] == 1.0
-    assert arr.iloc[0]["type_M"] == 0.0
-    assert arr.iloc[0]["type_H"] == 0.0
+RNG = np.random.default_rng(0)
 
 
-def test_create_features_df():
-    data = {
-        "UDI": [1, 2],
-        "Product ID": ["L47181", "M14860"],
-        "Type": ["L", "M"],
-        "Air temperature [K]": [298.1, 298.2],
-        "Process temperature [K]": [308.6, 308.7],
-        "Rotational speed [rpm]": [1551, 1408],
-        "Torque [Nm]": [42.8, 46.3],
-        "Tool wear [min]": [14, 0],
-        "Machine failure": [0, 0],
-        "TWF": [0, 0],
-        "HDF": [0, 0],
-        "PWF": [0, 0],
-        "OSF": [0, 0],
-        "RNF": [0, 0],
-    }
-    df = pd.DataFrame(data)
-    feats_df = create_features_df(df)
-
-    assert feats_df.shape == (2, len(ENGINEERED_FEATURE_NAMES))
-    assert list(feats_df.columns) == ENGINEERED_FEATURE_NAMES
-
-    # Ensure leakage columns are NOT present in engineered features
+def test_feature_names_unique_and_leak_free():
+    assert len(FEATURE_NAMES) == len(set(FEATURE_NAMES)) == 18
     for col in EXCLUDE_COLUMNS:
-        assert col not in feats_df.columns
+        assert col not in FEATURE_NAMES
+
+
+def test_gaussian_noise_statistics():
+    x = RNG.normal(0, 0.5, 2048)
+    f = extract_features(x)
+    assert list(f) == FEATURE_NAMES
+    assert abs(f["rms"] - 0.5) < 0.03
+    assert abs(f["kurtosis"] - 3.0) < 0.5  # Gaussian kurtosis ~ 3
+    assert abs(f["skewness"]) < 0.3
+    assert abs(sum(f[k] for k in FEATURE_NAMES if k.startswith("band_")) - 1.0) < 1e-6
+
+
+def test_impulses_raise_kurtosis_and_crest_factor():
+    x = RNG.normal(0, 0.1, 2048)
+    y = x.copy()
+    y[::180] += 3.0
+    fx, fy = extract_features(x), extract_features(y)
+    assert fy["kurtosis"] > fx["kurtosis"] + 3
+    assert fy["crest_factor"] > fx["crest_factor"]
+
+
+def test_envelope_feature_detects_periodic_impacts_at_bpfo():
+    rpm = 1797.0
+    bpfo = DEFECT_ORDERS["env_bpfo"] * rpm / 60
+    t = np.arange(2048) / TARGET_FS
+    impacts = (np.sin(2 * np.pi * bpfo * t) > 0.98).astype(float)  # impact train at BPFO
+    ring = np.sin(2 * np.pi * 3500 * t)  # structural resonance inside the 2-5.5 kHz band
+    x = 0.05 * RNG.normal(size=2048) + 2.0 * impacts * ring
+    healthy = 0.05 * RNG.normal(size=2048)
+    assert extract_features(x, TARGET_FS, rpm)["env_bpfo"] > 3 * extract_features(healthy, TARGET_FS, rpm)["env_bpfo"]
+
+
+def test_dc_offset_is_ignored():
+    x = RNG.normal(0, 0.3, 2048)
+    a, b = extract_features(x), extract_features(x + 5.0)
+    for k in FEATURE_NAMES:
+        assert a[k] == pytest.approx(b[k], rel=1e-6, abs=1e-9)
+
+
+def test_rejects_bad_windows():
+    with pytest.raises(ValueError):
+        extract_features(np.zeros(10))
+    with pytest.raises(ValueError):
+        extract_features(np.array([np.nan] * 512))
+
+
+def test_features_to_frame():
+    f = extract_features(RNG.normal(size=2048))
+    df = features_to_frame(f)
+    assert df.shape == (1, len(FEATURE_NAMES)) and list(df.columns) == FEATURE_NAMES
+    bad = dict(f)
+    bad.pop("rms")
+    with pytest.raises(ValueError):
+        features_to_frame(bad)
+    bad = dict(f, kurtosis=float("nan"))
+    with pytest.raises(ValueError):
+        features_to_frame(bad)
